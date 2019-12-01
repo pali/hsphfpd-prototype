@@ -1,0 +1,212 @@
+About hsphfpd
+=============
+
+hsphfpd is specification with some prototype implementation used for connecting
+Bluetooth devices with HSP and HFP profiles on Linux operating system.
+
+These two Bluetooth profiles are used by Bluetooth headphones, headsets or other
+equipments and are they only standard way how to transfer sound from microphone
+to computer.
+
+
+Description of problem
+======================
+
+HSP (Headset Profile) and HFP (Hands-free Profile) use two separate
+bi-directional link connections between local and remote device. First link
+is used for transferring AT modem commands and second link for audio data.
+
+Via AT modem commands are transferred more independent features. E.g.:
+
+  - Initialization of HFP connection
+  - Requests for establishing second link for audio data
+  - Configuration of codec audio parameters
+  - Changing volume of audio data
+  - Signaling of button press events
+  - Reporting of current battery level of both sides of connection
+  - Requests for displaying text on remote side (if has display)
+  - Usage of voice recognition function
+  - Notifications of new arrived SMS
+  - Standard Telephony operations (ring / dial / accept / hold / reject)
+  - Custom vendor extensions and its own features (e.g. Siri)
+  - ...
+
+For parsing, interpreting and generating AT modem commands is needed to
+implement modem Telephony stack and its state machine. Because lot of AT modem
+commands are state dependent and because only owner of AT modem socket can read
+and write AT modem commands, it just means that application which holds AT modem
+socket is the only once which can communicate with remote Bluetooth device.
+
+If application wants to receive voice from Bluetooth Headset's microphone
+(e.g. audio server) it needs to take HSP / HFP connection, implement audio parts
+of AT modem commands and initialize protocol connection. If another application
+wants to read Headset's battery level (e.g. power supply software) it is off
+luck as AT modem connection is already owned by audio server, it is statefull
+and probably initialized without reporting of battery level from Headset as
+audio server would not implement AT modem commands for periodic reporting of
+battery level. And if another application wants to be informed when Headset
+button is pressed (e.g. input layer) it is out of luck too. And also connecting
+Telephony modem to process Hands-Free actions is in this design impossible.
+Plus different vendors of Bluetooth Headset devices exports via AT modem
+commands custom features which are not related to any standard functionality
+(like displaying raw text on embedded display).
+
+The only possible way how to get audio functionality together with battery
+reporting status and with button press events and also with ability to display
+custom text on embedded headset display is to implement all required AT modem
+commands in one of these applications (which holds AT modem socket) and then
+re-export other functionality to other applications.
+
+But because neither audio server is interested in implementing functions for
+embedded displays, neither power supply daemon is interested in implementing
+audio routing, encoding, decoding and playing functionality, neither input
+layer software is going to process battery and power relayed functionality and
+also it is not up to the modem software to register input devices into kernel
+and process button press events, the only reasonable solution for this problem
+is to provide another software which would own HSP/HFP AT modem connection
+for remote Bluetooth devices and would forward commands, signals and requests
+to appropriate application. And this software is what hsphfpd.
+
+
+API specification
+=================
+
+See file hsphfpd.txt. It contains DBus API specification for communication
+between application and also design of ecosystem.
+
+
+Installation
+============
+
+Prototype hsphfpd daemon is written in Perl and depends on Perl Net::DBus
+module used for DBus communication.
+
+Install Perl Net::DBus module via some package manager:
+
+  sudo apt-get install libnet-dbus-perl
+  sudo yum install perl-Net-DBus
+  sudo zypper in perl-Net-DBus
+  sudo cpan Net::DBus
+
+And then copy DBus policy file into DBus system directory:
+
+  sudo cp org.hsphfpd.conf /etc/dbus-1/system.d/
+
+
+Running prototype
+=================
+
+Before trying to use hsphfpd prototye it is needed to stop any software which
+may implement Bluetooth HSP or HFP profiles (e.g. pulseaudio, ofono).
+
+For pulseaudio it is enough to unload bluetooth modules:
+
+  pactl unload-module module-bluez5-device
+  pactl unload-module module-bluez5-discover
+  pactl unload-module module-bluetooth-discover
+
+To stop ofono just run:
+
+  sudo service ofono stop
+
+After that it is possible to start hsphfpd prototype daemon implementation:
+
+  sudo ./hsphfpd.pl
+
+hsphfpd communicates via DBus directly with bluez daemon. If bluez daemon is
+not running yet, it is needed to start it too.
+
+And that is enough. For connecting HSP / HFP device it can be used any bluez
+software (KDE, Gnome, command line, ...).
+
+To see recognized HSP / HFP devices, look at system DBus. Any user in bluetooth
+group can list them e.g. via qdbus tool:
+
+  qdbus --system org.hsphfpd
+
+They are exported on object paths /org/hsphfpd/hciX/dev_XX_XX_XX_XX_XX_XX/XXX_XX
+
+
+Audio connection
+================
+
+For receiving audio from microphone or sending audio to speakers, it is needed
+to implement Audio agent which would connect to hsphfpd via DBus.
+
+This prototype implementation contains example of Audio agent audio_client.pl.
+For every remote connection from hsphfpd it sends remote microphone data to
+local speakers and local source of audio sends to remote speakers via external
+"pacat" application (part of pulseaudio). Via pavucontrol is possible to control
+what is local source of audio. To start this exmaple, just run:
+
+  ./audio_client.pl
+
+hsphfpd automatically accept audio connection from remote Bluetooth device and
+pass it to compatible Audio agent. To establish a new audio connection (e.g. if
+remote device did not do it yet), use DBus command:
+
+  qdbus --system org.hsphfpd PATH org.hsphfpd.Endpoint.ConnectAudio '' ''
+
+where PATH is DBus object path /org/hsphfpd/hciX/dev_XX_XX_XX_XX_XX_XX/XXX_XX
+for particular device. Use qdbus --system org.hsphfpd for listing them.
+
+
+Telephony connection
+====================
+
+All Telephony related AT commands are forwarded to Telephony application which
+should implement needed parts of Telephony stack. Telephony agent is then
+responsible for all Telephony related commands. If there is no Telephony agent
+registered to hsphfpd then hsphfpd simply return errors for these Telephony
+related commands (ring / dial / accept / hold / reject). So for normal audio
+operations, telephony agent is not required.
+
+Simple example of telephony agent which automatically accepts all incoming
+calls is in file telephony_client.pl. To start this example, just run:
+
+  ./telephony_client.pl
+
+Telephony agent can be started or stopped at any time, hsphfd will take care
+to properly initialize connection even if agent is started after HFP connection
+is already setup.
+
+
+Button press events
+===================
+
+Processing of them is implemented by hsphfpd itself. It registers kernel input
+device and notify kernel about pressed button. No other software is required.
+
+
+Power supply
+============
+
+Battery status level and device power source is exported via DBus property.
+Power supply software could connect to DBus signals for property changes to
+be informed about current state of battery in remote device.
+
+HFP profile also supports notifying remote device about local battery status
+level. For this purpose hsphfpd provides writable DBus properties which should
+be periodically updated by power supply software.
+
+
+Other functionality
+===================
+
+Most of other functions (like displaying text on embedded display) is exported
+via DBus methods directly by hsphfpd. See specification file hsphfpd.txt. It is
+expected that these non-standard or custom vendor extensions would be either
+implemented by hsphfpd directly or exported via new agents for other software.
+
+
+Audio features of bluetooth adapter
+===================================
+
+To list features of local bluetooth adapter there is tool sco_features.pl. It
+prints which commands and codecs are supported by bluetooth adapter. Please
+note that not all features supported by adapter are already implemented and
+supported by kernel.
+
+To print features of adapter with index 0, call:
+
+  sudo ./sco_features.pl 0

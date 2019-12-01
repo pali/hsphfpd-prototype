@@ -1,0 +1,774 @@
+Design
+======
+
+Start up
+--------
+
+hsphfpd                          BlueZ
+   |                               |
+   | register HSP HS profile agent |
+   | ----------------------------> |
+   |                               |
+   | register HSP AG profile agent |
+   | ----------------------------> |
+   |                               |
+   | register HFP HF profile agent |
+   | ----------------------------> |
+   |                               |
+   | register HFP AG profile agent |
+   | ----------------------------> |
+   |                               |
+
+Audio daemon                    hsphfpd
+   |                               |
+   |   register audio application  |
+   | ----------------------------> |
+   |                               |
+   |  request list of audio agents |
+   | <---------------------------- |
+   |  return list of audio agents  |
+   | ----------------------------> |
+   |                               |
+
+Telephony daemon                hsphfpd
+   |                               |
+   | register telephony application|
+   | ----------------------------> |
+   |                               |
+   |  request list of tel. agents  |
+   | <---------------------------- |
+   |  return list of tel. agents   |
+   | ----------------------------> |
+   |                               |
+
+HSP connection
+--------------
+
+hsphfpd                          Bluez               HSP
+   |                               |                  |
+   |                               | connection setup |
+   |                               | <--------------> |
+   |          NewConnection        |                  |
+   | <---------------------------- |                  |
+   |                               |                  |
+
+Connection is now established and fully working.
+hsphfpd will handle all AT commands defined by
+HSP profile. Button press event is exported by
+Linux input API and RING event via DBus signal.
+
+HFP connection
+--------------
+
+Telephony daemon                hsphfpd                          Bluez               HFP
+   |                               |                               |                  |
+   |                               |                               | connection setup |
+   |                               |                               | <--------------> |
+   |                               |     NewConnection with fd     |                  |
+   |                               | <---------------------------- |                  |
+   |                               |                               |                  |
+   |                +-----------------------------+                |                  |
+   |                | Processing of all bluetooth |                |                  |
+   |                | At commands as required for |                |                  |
+   |                | all HFP connection.         |                |                  |
+   |                +-----------------------------+                |                  |
+   |                               |                               |                  |
+
+                                          ....
+
+  Connection is now established and fully working. hsphfpd will reject all Telephony
+  function requests from HSP device until some Telephony agent is registered and
+  accepted Telephony transport. hsphfpd will handle button press events, battery
+  level reporting and other non-telephony events send via AT commands and exports
+  them via DBus signals.
+
+                                          ....
+
+   |                               |                               |                  |
+   |      NewConnection with fd    |                               |                  |
+   | <---------------------------- |                               |                  |
+   |                               |                               |                  |
+   |                +----------------------------+                 |                  |
+   |                | Telephony AT commands are  |                 |                  |
+   |                | now forwarded to Telephony |                 |                  |
+   |                | daemon, non-telephony are  |                 |                  |
+   |                | still processed by hsphfpd |                 |                  |
+   |                +----------------------------+                 |                  |
+   |                               |                               |                  |
+
+                                          ....
+
+   Connection is now established with Telephony agent. Telephony agent is now responsible
+   for all Telephony related AT commands. Non-telephony events (battery level reporting,
+   speaker/microphone gain) are still processed by hsphfpd.
+
+                                          ....
+
+Audio SCO connection
+--------------------
+
+Audio daemon                    hsphfpd
+   |                               |
+   |      NewConnection with fd    |
+   | <---------------------------- |
+   |                               |
+   | change mic. and speaker gain  |
+   | ----------------------------> |
+   |                               |
+   | change mic. and speaker gain  |
+   | <---------------------------- |
+   |                               |
+
+Audio connection can be established independently of Telephony agent. All audio related
+AT commands (codec negotiation, mic/speaker gain) are always handled by hsphfpd.
+
+Audio connection is automatically dropped when shutdown() syscall is called on SCO socket
+file descriptor.
+
+Processing of AT commands
+-------------------------
+
+Processing AT+BCC command which is not telephony related is always done in hsphfpd.
+
+Telephony daemon                hsphfpd                          Bluez               HFP
+   |                               |                               |                  |
+   |                               |                               |      AT+BCC      |
+   |                               |                               | <--------------- |
+   |                               |            AT+BCC             |                  |
+   |                               | <---------------------------- |                  |
+   |                               |                               |                  |
+   |                               |           +BCS: id            |                  |
+   |                               | ----------------------------> |                  |
+   |                               |                               |     +BCS: id     |
+   |                               |                               | ---------------> |
+   |                               |                               |                  |
+
+                                          ....
+
+Processing AT+BLDN command (dial last number) is forward to telephony daemon.
+
+Telephony daemon                hsphfpd                          Bluez               HFP
+   |                               |                               |                  |
+   |                               |                               |     AT+BLDN      |
+   |                               |                               | <--------------- |
+   |                               |           AT+BLDN             |                  |
+   |                               | <---------------------------- |                  |
+   |            AT+BLDN            |                               |                  |
+   | <---------------------------- |                               |                  |
+   |                               |                               |                  |
+   |              OK               |                               |                  |
+   | ----------------------------> |                               |                  |
+   |                               |              OK               |                  |
+   |                               | ----------------------------> |                  |
+   |                               |                               |        OK        |
+   |                               |                               | ---------------> |
+   |                               |                               |                  |
+   |                               |                               |                  |
+
+                                          ....
+
+Processing AT+BLDN command (dial last number) is done in hsphfpd when telephony daemon is not connected.
+
+hsphfpd                          Bluez               HFP
+   |                               |                  |
+   |                               |     AT+BLDN      |
+   |                               | <--------------- |
+   |           AT+BLDN             |                  |
+   | <---------------------------- |                  |
+   |                               |                  |
+   |            ERROR              |                  |
+   | ----------------------------> |                  |
+   |                               |      ERROR       |
+   |                               | ---------------> |
+   |                               |                  |
+   |                               |                  |
+
+
+Device hierarchy
+================
+
+Service		org.hsphfpd
+Interface	org.freedesktop.DBus.ObjectManager
+Object		/
+
+This is standard DBus org.freedesktop.DBus.ObjectManager interface. Method
+GetManagedObjects() returns only Endpoint objects. Signals InterfacesAdded()
+and InterfacesRemoved() are emitted only for Endpoint objects.
+
+Methods
+		dict GetManagedObjects()
+
+Signals
+		InterfacesAdded(object device, dict interfaces)
+
+		InterfacesRemoved(object device, array interfaces)
+
+
+Service		org.hsphfpd
+Interface	org.hsphfpd.ApplicationManager
+Object		/
+
+Methods
+		RegisterApplication(object application)
+
+			Register application. Caller should implement at
+			supplied object path application with standard
+			org.freedesktop.DBus.ObjectManager interface.
+			See section Application hierarchy.
+
+			Possible errors: org.hsphfpd.Error.InvalidArguments
+					 org.hsphfpd.Error.AlreadyExists
+
+		UnregisterApplication(object application)
+
+			Unregister previously registered application.
+			Application is automatically unregistered when caller
+			disconnect from DBus.
+
+			Possible errors: org.hsphfpd.Error.InvalidArguments
+					 org.hsphfpd.Error.DoesNotExist
+
+
+Service		org.hsphfpd
+Interface	org.hsphfpd.Endpoint
+Object		/org/hsphfpd/hciX/dev_XX_XX_XX_XX_XX_XX/XXX_XX
+
+This is base interface of all kind of endpoints. Endpoint is a specific profile
+with role of bluetooth device. E.g. Hands-Free profile in AudioGateway role of
+bluetooth device with address 00:11:22:33:44:55. If bluetooth device supports
+more profiles and roles then bluetooth devices is exported more times.
+
+Methods
+		void ConnectAudio(string air_codec, string agent_codec)
+
+			Connect audio transport with supplied air and agent
+			codecs. Endpoint must support air codec, adapter must
+			support air and agent codecs and some audio application
+			must provide agent with supported agent codec. Audio
+			transport socket is then passed to registered audio
+			application agent which is responsible for processing
+			audio.
+
+			Air codec represents a format used for transmitting data
+			over the air. Agent codec represents a format used by
+			audio application agent. If air codec does not match
+			agent codec then bluetooth adapter is doing conversion
+			between these two formats.
+
+			Standard air codec is CVSD and standard agent codec is
+			PCM_s16le_8kHz.
+
+			When this method is called with empty codec name then
+			codec is chosen automatically to some supported
+			combination.
+
+			Does not have to work for HSP profile in gateway role.
+			Also does not have to work for HFP profile in gateway
+			role when "codec-negotiation" feature is not supported.
+
+			Possible errors: org.hsphfpd.Error.InvalidArguments
+					 org.hsphfpd.Error.NotConnected
+					 org.hsphfpd.Error.AlreadyConnected
+					 org.hsphfpd.Error.InProgress
+					 org.hsphfpd.Error.InUse
+					 org.hsphfpd.Error.NotSupported
+					 org.hsphfpd.Error.NotAvailable
+					 org.hsphfpd.Error.Failed
+
+			Error org.hsphfpd.Error.NotSupported is returned when
+			either adapter or endpoint does not support supplied
+			codec. Error org.hsphfpd.Error.NotAvailable is returned
+			when there is no audio application agent which can
+			process agent codec.
+
+Properties
+		string Name [readonly, const]
+
+			Name of bluetooth device represented by Endpoint.
+
+		string RemoteAddress [readonly, const]
+
+			Address of bluetooth device represented by Endpoint.
+
+		string LocalAddress [readonly, const]
+
+			Address of bluetooth adapter.
+
+		bool Connected [readonly]
+
+			True whether Endpoint is connected.
+
+		bool AudioConnected [readonly]
+
+			True whether Endpoint has connected Audio agent.
+
+		bool TelephonyConnected [readonly]
+
+			True whether Endpoint has connected Telephony agent.
+
+		string Profile [readonly, const]
+
+			Type of bluetooth profile.
+
+			Possible values:
+			"headset"
+			"handsfree"
+
+		string Version [readonly]
+
+			Version of bluetooth profile.
+
+			Cached value. May be empty string before first connection.
+
+		string Role [readonly, const]
+
+			Role of bluetooth profile.
+
+			Possible values:
+			"gateway"
+			"client"
+
+		string PowerSource [readonly]
+
+			Power source of bluetooth device.
+
+			Possible values:
+			"unknown" - power source of bluetooth device is not known
+			"battery" - bluetooth device is powered by battery
+			"external" - bluetooth device has external power supply
+
+		int16 BatteryLevel [readonly]
+
+			Battery level of bluetooth device.
+
+			Possible values:
+			0-100 - battery charge level in percentage
+			-1 - battery charge level is not know or
+			     bluetooth device does not have battery
+
+		array{string} Features [readonly]
+
+			List of features supported by Endpoint.
+
+			HF features:
+			"echo-canceling-and-noise-reduction"
+			"three-way-calling"
+			"cli-presentation"
+			"voice-recognition"
+			"volume-control"
+			"enhanced-call-status"
+			"enhanced-call-control"
+			"codec-negotiation"
+			"hf-indicators"
+			"esco-s4-settings"
+
+			AG features:
+			"three-way-calling"
+			"echo-canceling-and-noise-reduction"
+			"voice-recognition"
+			"in-band-ring-tone"
+			"attach-voice-tag"
+			"reject-call"
+			"enhanced-call-status"
+			"enhanced-call-control"
+			"extended-error-codecs"
+			"codec-negotiation"
+			"hf-indicators"
+			"esco-s4-settings"
+
+			AG call hold features:
+			"release-all-held"
+			"release-specified-active-call"
+			"places-all-held"
+			"private-chat"
+			"create-multiparty"
+			"transfer"
+
+			HF indicator features:
+			"enhanced-safety"
+			"battery-level" (hf) / "report-battery-level" (ag)
+
+			AG indicator features:
+			"service-availability"
+			"call-status"
+			"call-setup"
+			"call-held"
+			"signal-strength"
+			"roam-status"
+			"report-battery-level" (hf) / "battery-level" (ag)
+
+			CSR features:
+			"caller-name"
+			"csr-display-text"
+			"csr-sms-indication"
+			"csr-battery-level"
+			"csr-power-source"
+
+			Apple features:
+			"apple-battery-level"
+			"apple-dock-state"
+			"apple-siri-status"
+			"apple-noise-reduction-status"
+
+			Cached value. May be empty array before feature
+			negotiation is complete.
+
+		array{string} AudioCodecs [readonly]
+
+			List of air codecs supported by bluetooth device
+			represented by Endpoint.
+
+			Cached value. May be empty array before codec list
+			negotiation is complete.
+
+
+Service		org.hsphfpd
+Interface	org.hsphfpd.ClientEndpoint
+Object		/org/hsphfpd/hciX/dev_XX_XX_XX_XX_XX_XX/XXX_hX
+
+This interface is specific for Client role endpoints.
+
+Methods
+		void SendDisplayTextEvent(string text)
+
+			Send event to remote bluetooth device to display
+			supplied on own screen. This is supported only
+			when Endpoint support "csr-display-text" feature.
+
+			Possible errors: org.hsphfpd.Error.InvalidArguments
+					 org.hsphfpd.Error.NotConnected
+					 org.hsphfpd.Error.NotSupported
+
+
+Service		org.hsphfpd
+Interface	org.hsphfpd.HSPClientEndpoint
+Object		/org/hsphfpd/hciX/dev_XX_XX_XX_XX_XX_XX/hsp_hs
+
+This interface is specific for Client role endpoints of Headset Profile.
+
+Methods
+		SendIncomingCallEvent()
+
+			Send ring event to remote bluetooth device about
+			incoming call.
+
+			Possible errors: org.hsphfpd.Error.InvalidArguments
+					 org.hsphfpd.Error.NotConnected
+
+
+Service		org.hsphfpd
+Interface	org.hsphfpd.GatewayEndpoint
+Object		/org/hsphfpd/hciX/dev_XX_XX_XX_XX_XX_XX/XXX_ag
+
+This interface is specific for Gateway role endpoints.
+
+Signals
+		DisplayText(string text)
+
+			This signal is emitted when remote device want to show
+			supplied text on our screen. Signal can be emitted only
+			when Endpoint support "csr-display-text" feature.
+
+
+Service		org.hsphfpd
+Interface	org.hsphfpd.HSPGatewayEndpoint
+Object		/org/hsphfpd/hciX/dev_XX_XX_XX_XX_XX_XX/hsp_ag
+
+This interface is specific for Gateway role endpoints of Headset Profile.
+
+Methods
+		SendButtonPressEvent()
+
+			Send button press event to remote bluetooth device.
+			Headset profile supports only one button.
+
+			Possible errors: org.hsphfpd.Error.InvalidArguments
+					 org.hsphfpd.Error.NotConnected
+
+Signals
+		IncomingCall()
+
+			This signal is emitted when remote device is sending
+			to us ring event which signals incoming call. You may
+			react on this signal with sending button press event
+			via method SendButtonPressEvent().
+
+
+Service		org.hsphfpd
+Interface	org.hsphfpd.AudioTransport
+Object		/org/hsphfpd/hciX/dev_XX_XX_XX_XX_XX_XX/audio_fdX
+
+This interface represents audio transport between audio application agent and
+hsphfpd daemon.
+
+Methods
+		void Release()
+
+			Release and disconnect this audio transport. Underlying
+			socket is closed and audio transport is destroyed.
+
+Properties
+		uint16 MicrophoneGain [readwrite]
+
+			Microphone gain value reported by remote device. Audio
+			application agent should respect it. Property is changed
+			when remote device ask request changing it. Property is
+			possible to change also by audio application agent. Then
+			change event is send to remote device.
+
+			Possible values:
+			0-15
+
+		uint16 SpeakerGain [readwrite]
+
+			Speaker gain value reported by remote device. Audio
+			application agent should respect it. Property is changed
+			when remote device ask request changing it. Property is
+			possible to change also by audio application agent. Then
+			change event is send to remote device.
+
+			Possible values:
+			0-15
+
+		string AgentCodec [readonly, const]
+
+			Codec used by audio application agent.
+
+		string AirCodec [readonly, const]
+
+			Codec used for transmitting data over the air.
+
+		object Endpoint [readonly, const]
+
+			Endpoint to which this audio transport belongs.
+
+
+Power supply hierarchy
+======================
+
+Service		org.hsphfpd
+Interface	org.hsphfpd.PowerSupply
+Object		/org/hsphfpd/power_supply
+
+This interface is for external power supply daemon (e.g. upower).
+It should periodically update exported properties to up-to-date state
+of our main device battery. hsphfpd then notify all connected bluetooth
+devices about power supply status.
+
+Properties
+		string PowerSource [readwrite]
+
+			Power source of our main device battery.
+
+			Possible values:
+			"unknown" - power source of our device is not known
+			"battery" - our device is powered by battery
+			"external" - our device has external power supply
+
+		int16 BatteryLevel [readwrite]
+
+			Battery level of our device.
+
+			Possible values:
+			0-100 - battery charge level in percentage
+			-1 - battery charge level is not know or
+			     our device does not have any battery
+
+
+Application hierarchy
+=====================
+
+Every application (either audio or telephony) should implement this standard
+DBus interface org.freedesktop.DBus.ObjectManager. Method GetManagedObjects()
+should return all audio and telephony agents in application's preferred order.
+Object path of this application is registered to hsphfpd via method
+RegisterApplication() on interface org.hsphfpd.ApplicationManager.
+
+Service		<freely defined>
+Interface	org.freedesktop.DBus.ObjectManager
+Object		<freely defined>
+
+Methods
+		dict GetManagedObjects()
+
+Signals
+		InterfacesAdded(object agent, dict interfaces)
+
+		InterfacesRemoved(object agent, array interfaces)
+
+
+Audio Agent hierarchy
+=====================
+
+Service		<freely defined>
+Interface	org.hsphfpd.AudioAgent
+Object		<freely defined>
+
+This interface represents audio agent. Audio agent is responsible for processing
+audio transport. Discovery of audio agents by hsphfpd is done by calling
+GetManagedObjects() method on object path registered by RegisterApplication()
+method.
+
+Methods
+		void NewConnection(object audio_transport, fd sco, dict properties)
+
+			properties:
+				uint16 MicrophoneGain
+				uint16 SpeakerGain
+				uint16 MTU
+				object Endpoint
+				string Name
+				string LocalAddress
+				string RemoteAddress
+				string Profile
+				string Version
+				string Role
+				string AirCodec
+
+			Properties are same as exported on audio transport
+			object and endpoint object.
+
+			Called when new audio transport is created. Audio
+			transport object is automatically destroyed when
+			either shutdown() syscall on passed file descriptor
+			is called or when Release method on audio transport
+			object is called. Audio application agent should
+			monitor POLLHUP event on passed file descriptor.
+
+			AirCodec does not have to match AgentCodec (e.g. when
+			hardware is doing encoding and decoding of data).
+
+			Possible errors: org.hsphfpd.Error.Rejected
+					 org.hsphfpd.Error.Canceled
+
+			When org.hsphfpd.Error.Rejected is returned then other
+			audio agent is used. In this case application should
+			not read/write data from/to SCO socket and also should
+			not modify SCO socket properties.
+
+			When org.hsphfpd.Error.Canceled is returned then no
+			other audio agent is used and audio transfer is
+			immediately destroyed. This error may be returned also
+			when application already read/write data from/to socket.
+
+Properties
+		string AgentCodec [readonly, const]
+
+			Format in which agent read/write data from/to SCO
+			socket. If application supports more codecs, it needs
+			to export more agents, one per codec. AgentCodec does
+			not have to match AirCodec (e.g. when hardware is doing
+			encoding and decoding of data).
+
+			Must not be empty and must not be changed.
+
+
+Telephony Agent hierarchy
+=========================
+
+This interface represents telephony agent. Telephony agent is responsible for
+processing Telephony AT commands for HFP devices. Discovery of telephony agents
+by hsphfpd is done by calling GetManagedObjects() method on object path
+registered by RegisterApplication() method.
+
+When Telephony agent is not connected to HFP device then hsphfpd takes care of
+it and provides dummy responses to HFP devices.
+
+Service:	<freely defined>
+Interface	org.hsphfpd.TelephonyAgent
+Object		<freely defined>
+
+Methods
+		void NewConnection(object endpoint, fd socket, dict properties)
+
+			properties:
+				string Name
+				string LocalAddress
+				string RemoteAddress
+				string Profile
+				string Version
+				array{string} Features
+				array{string} Indicators
+
+			Properties are same as exported on endpoint object.
+
+			Additional property Indicators contains list of AG
+			indicators in same order as they were already sent
+			in +CIND: response to HF device. This property is
+			available only for endpoints in gateway role.
+
+			This metod is called for each endpoint when does not
+			have connected any Telephony agent yet. Telephony
+			connection is automatically destroyed when either
+			shutdown() syscall on passed file descriptor is called
+			or when endpoint is moved to disconnected state. In
+			later case hsphfd calls shutdown() syscall. So
+			Telephony application agent should monitor POLLHUP
+			event on passed file descriptor. Calling shutdown()
+			syscall for still connected endpoint does not
+			disconnect endpoint, it only disconnects Telephony
+			connection.
+
+			Possible errors: org.hsphfpd.Error.Rejected
+					 org.hsphfpd.Error.Canceled
+
+			When org.hsphfpd.Error.Rejected is returned then other
+			telephony agent is used. In this case application
+			should not read/write data from/to socket and also
+			should not modify socket properties.
+
+			When org.hsphfpd.Error.Canceled is returned then no
+			other telephony agent is used and telephony connection
+			is immediately destroyed. This error may be returned
+			also when application already read/write data from/to
+			socket.
+
+Properties
+		string Role [readonly, const]
+
+			Role of modem. In client role agent acts as a client
+			for AT modem, it receives AT+cmd commands on which it
+			response with OK, ERROR or +status: codes. In gateway
+			role agent acts as a AT modem, it sends AT+cmd and
+			expects for OK, ERROR or +status code responses.
+
+			If application supports more then one role, it needs
+			to export more agents. It could exports also more agents
+			of same role and via org.hsphfpd.Error.Rejected error
+			code from NewConnection can control which agent finally
+			takes telephony connection.
+
+			Must not be changed.
+
+			Possible values:
+			"gateway"
+			"client"
+
+
+Possible agent codecs:
+alaw
+ulaw
+CVSD
+AuriStream_2bit_8kHz
+AuriStream_2bit_16kHz
+AuriStream_4bit_8kHz
+AuriStream_4bit_16kHz
+mSBC
+PCM_s16le_8kHz
+PCM_u16le_8kHz
+PCM_s8le_8kHz
+PCM_u8le_8kHz
+
+Possible air codecs:
+alaw
+ulaw
+CVSD
+AuriStream_2bit_8kHz
+AuriStream_2bit_16kHz
+AuriStream_4bit_8kHz
+AuriStream_4bit_16kHz
+mSBC
+
+Currently supported codecs combinations:
+air=CVSD agent=PCM_s16le_8kHz
+air=mSBC agent=mSBC
