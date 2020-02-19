@@ -22,17 +22,7 @@ use constant OCF_READ_VOICE_SETTING => 0x25;
 use constant OCF_READ_LOCAL_COMMANDS => 0x02;
 use constant OCF_READ_LOCAL_EXT_FEATURES => 0x04;
 use constant OCF_READ_LOCAL_CODECS => 0x0B;
-
-use constant HCIGETDEVINFO => eval {
-	use vars '%sizeof';
-	require "sys/ioctl.ph";
-	if (not defined $sizeof{'int'}) {
-		%Config::Config = ();
-		require Config;
-		$sizeof{'int'} = $Config::Config{intsize} || 4;
-	}
-	_IOR(ord 'H', 211, 'int');
-} || 2147764435;
+use constant HCIGETDEVINFO => 2147764435;
 
 sub hci_cmd {
 	my ($sock, $ogf, $ocf, $text, $data) = @_;
@@ -97,8 +87,12 @@ sub hci_local_codecs {
 	die "Invalid response for READ_LOCAL_CODECS command from bluetooth socket\n" unless $local_codecs_len >= 2 and length $local_codecs_packed >= 2;
 	my ($local_codecs_status, $local_codecs_count) = unpack 'CC', $local_codecs_packed;
 	die "READ_LOCAL_CODECS command on bluetooth socket failed: $local_codecs_status" unless $local_codecs_status == 0;
-	die "Invalid response for READ_LOCAL_CODECS command from bluetooth socket\n" unless length $local_codecs_packed >= 2+$local_codecs_count;
-	return map ord $_, split //, substr $local_codecs_packed, $local_codecs_count;
+	die "Invalid response for READ_LOCAL_CODECS command from bluetooth socket\n" unless length $local_codecs_packed >= 2+$local_codecs_count+1;
+	my $local_vendor_codecs_count = unpack 'C', substr $local_codecs_packed, 2+$local_codecs_count, 1;
+	die "Invalid response for READ_LOCAL_CODECS command from bluetooth socket\n" unless length $local_codecs_packed >= 2+$local_codecs_count+1+4*$local_vendor_codecs_count;
+	my @local_codecs = unpack 'C*', substr $local_codecs_packed, 2, $local_codecs_count;
+	my @local_vendor_codecs = unpack 'V*', substr $local_codecs_packed, 2+$local_codecs_count+1, 4*$local_vendor_codecs_count;
+	return \@local_codecs, \@local_vendor_codecs;
 }
 
 sub hci_voice_setting {
@@ -122,13 +116,13 @@ die "Usage: $0 hci_id\n" unless defined $id and $id =~ /^[0-9]+$/;
 
 my $sock = hci_sock($id);
 
-my ($local_commands, @ext_features, @local_codecs, $voice_setting);
+my ($local_commands, @ext_features, $local_codecs, $local_vendor_codecs, $voice_setting);
 
 sub hci_call(&) { eval { $_[0]->(); 1 } or do { warn $@; close $sock; $sock = hci_sock($id); 0 } }
 
 hci_call { $local_commands = hci_local_commands($sock) };
 hci_call { @ext_features = hci_ext_features($sock) } or hci_call { @ext_features = hci_ext_features_old_way($sock) };
-hci_call { @local_codecs = hci_local_codecs($sock) };
+hci_call { ($local_codecs, $local_vendor_codecs) = hci_local_codecs($sock) };
 hci_call { $voice_setting = hci_voice_setting($sock) };
 
 print "SCO Commands:\n";
@@ -152,8 +146,8 @@ print "\tCVSD: " . ((not defined $ext_features[2]) ? 'unknown' : ($ext_features[
 print "\tTransparent: " . ((not defined $ext_features[2]) ? 'unknown' : ($ext_features[2] & (1 << 3)) ? 'supported' : 'not supported') . "\n";
 
 my %local_codecs;
-if (@local_codecs) {
-	%local_codecs = map { $_ => 'supported' } @local_codecs;
+if ($local_codecs and @{$local_codecs}) {
+	%local_codecs = map { $_ => 'supported' } @{$local_codecs};
 } else {
 	$local_codecs{0x00} = 'expected to be supported' if defined $ext_features[1] and $ext_features[1] & (1 << 6);
 	$local_codecs{0x01} = 'expected to be supported' if defined $ext_features[1] and $ext_features[1] & (1 << 7);
@@ -163,6 +157,13 @@ if (@local_codecs) {
 my @cid = qw(u-Law A-Law CVSD Transparent Linear-PCM mSBC);
 print "Local Codecs:\n";
 print "\t$cid[$_]: " . (exists $local_codecs{$_} ? $local_codecs{$_} : 'not supported') . "\n" foreach 0..$#cid;
+printf "\tUnknown Codec 0x%02x: supported\n", $_ foreach grep { $_ > $#cid } sort { $a <=> $b } keys %local_codecs;
+print "Local Vendor Codecs:\n";
+if ($local_vendor_codecs and @{$local_vendor_codecs}) {
+	printf "\tVendor=0x%02x Codec=0x%02x\n", ($_ & 0xFFFF), ($_ >> 4) foreach sort { ($a & 0xFFFF) <=> ($b & 0xFFFF) || ($a >> 4) <=> ($b >> 4) } @{$local_vendor_codecs};
+} else {
+	print "\t(none supported)\n";
+}
 
 my @acf = qw(CVSD u-Law A-Law Transparent);
 my @iss = qw(8-bit 16-bit);
