@@ -145,6 +145,13 @@ my %hf_features_mask;
 	%hf_features_mask = map { (($tmp <<= 1) >> 1) => $_ } @hf_features_defines;
 }
 
+my %hf_profile_features_mask;
+{
+	my @hf_profile_features_defines = qw(echo-canceling-and-noise-reduction three-way-calling cli-presentation voice-recognition volume-control wide-band-speech);
+	my $tmp = 0b1;
+	%hf_profile_features_mask = map { (($tmp <<= 1) >> 1) => $_ } @hf_profile_features_defines;
+}
+
 my %hf_codecs_map = (1 => 'CVSD', 2 => 'mSBC');
 my %hf_indicators_map = (1 => 'enhanced-security', 2 => 'battery-level');
 my $hf_indicator_battery = 2;
@@ -180,6 +187,13 @@ my $ag_indicator_call_setup;
 	}
 }
 
+my %ag_profile_features_mask;
+{
+	my @ag_profile_features_defines = qw(three-way-calling echo-canceling-and-noise-reduction voice-recognition in-band-ring-tone attach-voice-tag wide-band-speech);
+	my $tmp = 0b1;
+	%ag_profile_features_mask = map { (($tmp <<= 1) >> 1) => $_ } @ag_profile_features_defines;
+}
+
 ### Global state ###
 
 my $our_power_source = 'unknown';
@@ -198,10 +212,10 @@ my $fd_num = 0;
 # hsphfpd telephony agent: {type=telephony, path, role}
 
 my %profiles; # profile => exists
-my %adapters; # adapter => {address, socket, devices => {device => exists}, codecs => {air_codec => agent_codec => exists}}
+my %adapters; # adapter => {address, devices => {device => exists}, codecs => {air_codec => agent_codec => exists}}
 my %devices; # device => {adapter, selected_profile, profiles => {profile => endpoint}}
-my %endpoints; # endpoint => {device, audio, profile, object, properties, ag_indicators, ag_indicators_reporting, ag_call_waiting_notifications, hf_features, csr_features, apple_features, hf_codecs, csr_codecs, selected_codec, socket, microphone_gain, speaker_gain}
-my %audios; # audio => {endpoint, socket, object, air_codec, agent_codec, agent_path, application_service, application_path}
+my %endpoints; # endpoint => {device, audio, profile, object, properties, hs_volume_control, hfp_wide_band_speech, ag_features, ag_indicators, ag_indicators_reporting, ag_call_waiting_notifications, hf_features, csr_features, apple_features, hf_codecs, csr_codecs, selected_codec, socket, microphone_gain, speaker_gain}
+my %audios; # audio => {endpoint, socket, object, mtu, air_codec, agent_codec, agent_path, application_service, application_path}
 my @applications; # [application]
 
 ### Main code ###
@@ -224,7 +238,46 @@ my $bluez_profile_manager = $bluez_service->get_object('/org/bluez', 'org.bluez.
 my $bluez_object_manager = $bluez_service->get_object('/', 'org.freedesktop.DBus.ObjectManager');
 $bluez_object_manager->connect_to_signal('InterfacesAdded', \&bluez_interfaces_added);
 $bluez_object_manager->connect_to_signal('InterfacesRemoved', \&bluez_interfaces_removed);
+
+my $sco_listening_socket;
+print "Creating listening SCO socket\n";
+# PF_BLUETOOTH => 31, SOCK_SEQPACKET => 5, BTPROTO_SCO => 2
+socket $sco_listening_socket, 31, 5, 2 or print "Opening SCO listening socket failed: $!\n";
+if ($sco_listening_socket) {
+	# AF_BLUETOOTH => 31, struct sockaddr_sco { sa_family_t sco_family; bdaddr_t sco_bdaddr; }, sa_family_t = uint16_t, bdaddr_t = uint8_t[6] (in reverse order)
+	bind $sco_listening_socket, pack 'S(H2)6', 31, reverse split /:/, "00:00:00:00:00:00" or do { print "Binding listening SCO socket to local address failed: $!\n"; close $sco_listening_socket; undef $sco_listening_socket; };
+}
+# SOL_BLUETOOTH => 274, BT_DEFER_SETUP => 7, int
+my $kernel_defer_support = defined $sco_listening_socket && defined setsockopt $sco_listening_socket, 274, 7, pack 'i', 1;
+# SOL_BLUETOOTH => 274, BT_VOICE => 11, struct bt_voice { uint16_t setting; }
+my $kernel_msbc_support = $kernel_defer_support && defined getsockopt $sco_listening_socket, 274, 11;
+# SOL_BLUETOOTH => 274, BT_VOICE_SETUP => 14, ...
+my $kernel_anycodec_support = $kernel_defer_support && defined getsockopt $sco_listening_socket, 274, 14;
+if ($sco_listening_socket) {
+	if (listen $sco_listening_socket, 10) {
+		$reactor->add_read(fileno $sco_listening_socket, sub { hsphfpd_accept_audio() });
+	} else {
+		print "Listening on SCO socket failed: $!\n";
+		close $sco_listening_socket;
+		undef $sco_listening_socket;
+	}
+}
+
 bluez_enumerate_objects();
+
+$SIG{INT} = $SIG{TERM} = sub {
+	print "\nReceived signal, exiting...\n";
+	exit 0 unless $reactor->{running};
+	if (defined $sco_listening_socket) {
+		print "Closing SCO listening socket\n";
+		$reactor->remove_read(fileno $sco_listening_socket);
+		close $sco_listening_socket;
+		undef $sco_listening_socket;
+	}
+	hsphfpd_unregister_application_i($_) foreach reverse 0..$#applications;
+	bluez_release_profiles();
+	$reactor->shutdown();
+};
 
 $reactor->run();
 exit 0;
@@ -266,15 +319,23 @@ sub hsphfpd_register_application {
 	$timer_id = $reactor->add_timeout(0, sub {
 		if (not $application->{deleted}) {
 			$application->{manager} = Net::DBus::RemoteService->new($bus, $caller, $caller)->get_object($path, 'org.freedesktop.DBus.ObjectManager');
-			$application->{sigid1} = $application->{manager}->connect_to_signal('InterfacesAdded', sub { hsphfpd_application_interfaces_added($application, @_) });
-			$application->{sigid2} = $application->{manager}->connect_to_signal('InterfacesRemoved', sub { hsphfpd_application_interfaces_removed($application, @_) });
-			my $agents = eval { $application->{manager}->GetManagedObjects() };
-			if (not defined $agents) {
+			$application->{sigid1} = eval { $application->{manager}->connect_to_signal('InterfacesAdded', sub { hsphfpd_application_interfaces_added($application, @_) }) };
+			if (not defined $application->{sigid1}) {
 				print "Application $caller $path object manager returned error: $@";
-			} elsif (ref $agents ne 'HASH') {
-				print "Application $caller $path object manager returned invalid response\n";
 			} else {
-				hsphfpd_application_interfaces_added($application, $_, $agents->{$_}) foreach sort keys %{$agents};
+				$application->{sigid2} = eval { $application->{manager}->connect_to_signal('InterfacesRemoved', sub { hsphfpd_application_interfaces_removed($application, @_) }) };
+				if (not defined $application->{sigid2}) {
+					print "Application $caller $path object manager returned error: $@";
+				} else {
+					my $agents = eval { $application->{manager}->GetManagedObjects() };
+					if (not defined $agents) {
+						print "Application $caller $path object manager returned error: $@";
+					} elsif (ref $agents ne 'HASH') {
+						print "Application $caller $path object manager returned invalid response\n";
+					} else {
+						hsphfpd_application_interfaces_added($application, $_, $agents->{$_}) foreach sort keys %{$agents};
+					}
+				}
 			}
 		}
 		$reactor->remove_timeout($timer_id);
@@ -287,8 +348,8 @@ sub hsphfpd_unregister_application_i {
 	my ($i) = @_;
 	print "Unregistering application " . $applications[$i]->{service} . " " . $applications[$i]->{path} . " and all it's agents\n";
 	if (exists $applications[$i]->{manager}) {
-		$applications[$i]->{manager}->disconnect_from_signal('InterfacesAdded', $applications[$i]->{sigid1});
-		$applications[$i]->{manager}->disconnect_from_signal('InterfacesRemoved', $applications[$i]->{sigid2});
+		eval { $applications[$i]->{manager}->disconnect_from_signal('InterfacesAdded', $applications[$i]->{sigid1}) };
+		eval { $applications[$i]->{manager}->disconnect_from_signal('InterfacesRemoved', $applications[$i]->{sigid2}) };
 		delete $applications[$i]->{manager};
 	}
 	my @audios = @{$applications[$i]->{audios}};
@@ -422,13 +483,13 @@ sub hsphfpd_connect_telephony {
 	print "Trying to connect some telephony agent for endpoint $endpoint\n";
 	my $role = $endpoints{$endpoint}->{properties}->{Role}->value();
 	my $properties = {
-		Name => dbus_variant($endpoints{$endpoint}->{properties}->{Name}),
-		LocalAddress => dbus_variant($endpoints{$endpoint}->{properties}->{LocalAddress}),
-		RemoteAddress => dbus_variant($endpoints{$endpoint}->{properties}->{RemoteAddress}),
-		Profile => dbus_variant($endpoints{$endpoint}->{properties}->{Profile}),
-		Version => dbus_variant($endpoints{$endpoint}->{properties}->{Version}),
-		Features => dbus_variant($endpoints{$endpoint}->{properties}->{Features}),
-		(($role eq 'client') ? (Indicators => dbus_variant(dbus_array([ map { dbus_string($ag_indicators{$_}->{name}) } sort { $a <=> $b } keys %ag_indicators ]))) : ()),
+		Name => $endpoints{$endpoint}->{properties}->{Name},
+		LocalAddress => $endpoints{$endpoint}->{properties}->{LocalAddress},
+		RemoteAddress => $endpoints{$endpoint}->{properties}->{RemoteAddress},
+		Profile => $endpoints{$endpoint}->{properties}->{Profile},
+		Version => $endpoints{$endpoint}->{properties}->{Version},
+		Features => $endpoints{$endpoint}->{properties}->{Features},
+		(($role eq 'client') ? (Indicators => dbus_array([ map { dbus_string($ag_indicators{$_}->{name}) } sort { $a <=> $b } keys %ag_indicators ])) : ()),
 	};
 	my $telephony;
 	my $connected;
@@ -624,31 +685,38 @@ sub hsphfpd_set_sco_codec {
 	return 1;
 }
 
+sub hsphfpd_get_bluetooth_address {
+	my ($packed_address) = @_;
+	# AF_BLUETOOTH => 31, struct sockaddr_sco { sa_family_t sco_family; bdaddr_t sco_bdaddr; }, sa_family_t = uint16_t, bdaddr_t = uint8_t[6] (in reverse order)
+	my ($family, @address) = unpack 'S(H2)6', $packed_address;
+	return unless defined $family and $family == 31;
+	return unless @address == 6 and length $packed_address == 8;
+	return uc join ':', reverse @address;
+}
+
 sub hsphfpd_accept_audio {
-	my ($listening_socket, $local_address, $defer_setup) = @_;
-	print "Accepting new audio transport on local address $local_address\n";
+	print "Accepting new audio transport\n";
 	my $socket;
-	my $packed_address = accept $socket, $listening_socket;
-	if (not defined $packed_address) {
+	my $packed_remote_address = accept $socket, $sco_listening_socket;
+	if (not defined $packed_remote_address) {
 		print "Accepting new audio transport failed: $!\n";
 		return;
 	}
-	# AF_BLUETOOTH => 31, struct sockaddr_sco { sa_family_t sco_family; bdaddr_t sco_bdaddr; }, sa_family_t = uint16_t, bdaddr_t = uint8_t[6] (in reverse order)
-	my ($family, @remote_address) = unpack 'S(H2)6', $packed_address;
-	if (not defined $family or $family != 31) {
-		print "Audio transport is not bluetooth, closing it\n";
+	my $local_address = hsphfpd_get_bluetooth_address(getsockname($socket));
+	if (not defined $local_address) {
+		print "Audio transport has unknown local address, closing it\n";
 		shutdown $socket, 2;
 		close $socket;
 		return;
 	}
-	if (@remote_address != 6 or length $packed_address ne 8) {
+	my $remote_address = hsphfpd_get_bluetooth_address($packed_remote_address);
+	if (not defined $remote_address) {
 		print "Audio transport has unknown remote address, closing it\n";
 		shutdown $socket, 2;
 		close $socket;
 		return;
 	}
-	my $remote_address = uc join ':', reverse @remote_address;
-	print "Remote address is $remote_address\n";
+	print "Local address is $local_address and remote address is $remote_address\n";
 	my @candidates;
 	my $device;
 	foreach (sort keys %endpoints) {
@@ -682,7 +750,7 @@ sub hsphfpd_accept_audio {
 	my $air_codec = $endpoints{$endpoint}->{selected_codec};
 	my $agent_codecs = $adapters{$adapter}->{codecs}->{$air_codec};
 	my $agent_codec;
-	if (not $defer_setup) {
+	if (not $kernel_defer_support) {
 		# Without defer setup, kernel already accepted SCO connection with CVSD air codec and PCM_s16le_8kHz agent codec
 		if ($air_codec ne 'CVSD') {
 			print "Selected air codec $air_codec is not supported by kernel\n";
@@ -698,7 +766,7 @@ sub hsphfpd_accept_audio {
 		}
 		print "Choosing agent codec PCM_s16le_8kHz\n";
 		$agent_codec = 'PCM_s16le_8kHz';
-		if (not eval { hsphfpd_establish_audio($endpoint, $socket, $agent_codec); 1 }) {
+		if (not eval { hsphfpd_establish_audio($endpoint, $socket, $agent_codec, @applications); 1 }) {
 			shutdown $socket, 2;
 			close $socket;
 			return;
@@ -736,7 +804,7 @@ sub hsphfpd_accept_audio {
 			print "SCO socket for audio transport is now connected\n";
 			$reactor->remove_write(fileno $socket);
 			$reactor->remove_exception(fileno $socket);
-			if (not eval { hsphfpd_establish_audio($endpoint, $socket, $agent_codec); 1 }) {
+			if (not eval { hsphfpd_establish_audio($endpoint, $socket, $agent_codec, @applications); 1 }) {
 				shutdown $socket, 2;
 				close $socket;
 			}
@@ -745,7 +813,7 @@ sub hsphfpd_accept_audio {
 }
 
 sub hsphfpd_connect_audio {
-	my ($endpoint, $air_codec, $agent_codec) = @_;
+	my ($endpoint, $caller, $air_codec, $agent_codec) = @_;
 	throw_dbus_error('org.hsphfpd.Error.InvalidArguments', qq(Endpoint "$endpoint" does not exist)) unless exists $endpoints{$endpoint};
 	throw_dbus_error('org.hsphfpd.Error.NotConnected', qq(Endpoint "$endpoint" is not connected yet)) unless $endpoints{$endpoint}->{properties}->{Connected}->value();
 	throw_dbus_error('org.hsphfpd.Error.AlreadyConnected', qq(Audio transport for endpoint "$endpoint" is already connected)) if $endpoints{$endpoint}->{properties}->{AudioConnected}->value();
@@ -753,6 +821,7 @@ sub hsphfpd_connect_audio {
 	my $local_address = $endpoints{$endpoint}->{properties}->{LocalAddress}->value();
 	my $remote_address = $endpoints{$endpoint}->{properties}->{RemoteAddress}->value();
 	throw_dbus_error('org.hsphfpd.Error.InUse', qq(Audio transport for device "$remote_address" is already in use)) if grep { $_ ne $endpoint and lc $endpoints{$_}->{properties}->{RemoteAddress}->value() eq lc $remote_address and exists $endpoints{$_}->{audio} } keys %endpoints;
+	my @sorted_applications = sort { ($a->{service} eq $caller) ? ($b->{service} eq $caller ? 0 : -1) : ($b->{service} eq $caller ? 1 : 0) } @applications;
 	print "Connecting audio transport for endpoint $endpoint with air_codec $air_codec and agent_codec $agent_codec\n";
 	my $adapter = $devices{$endpoints{$endpoint}->{device}}->{adapter};
 	my $endpoint_codecs = $endpoints{$endpoint}->{codecs};
@@ -760,13 +829,13 @@ sub hsphfpd_connect_audio {
 	if ($air_codec ne '') {
 		throw_dbus_error('org.hsphfpd.Error.NotSupported', qq(Air codec "$air_codec" is not supported by endpoint)) unless exists $endpoint_codecs->{$air_codec};
 		throw_dbus_error('org.hsphfpd.Error.NotSupported', qq(Air codec "$air_codec" is not supported by adapter)) unless exists $air_codecs->{$air_codec};
-		throw_dbus_error('org.hsphfpd.Error.NotAvailable', qq(There is no application with audio agent)) unless grep { grep { $_->{type} eq 'audio' } @{$_->{agents}} } @applications;
+		throw_dbus_error('org.hsphfpd.Error.NotAvailable', qq(There is no application with audio agent)) unless grep { grep { $_->{type} eq 'audio' } @{$_->{agents}} } @sorted_applications;
 		my $agent_codecs = $air_codecs->{$air_codec};
 		if ($agent_codec ne '') {
 			throw_dbus_error('org.hsphfpd.Error.NotSupported', qq(Air codec "$air_codec" with agent codec "$agent_codec" is not supported by adapter)) unless exists $agent_codecs->{$agent_codec};
-			throw_dbus_error('org.hsphfpd.Error.NotAvailable', qq(There is no application with audio agent for agent codec "$agent_codec")) unless grep { grep { $_->{type} eq 'audio' and $_->{codec} eq $agent_codec } @{$_->{agents}} } @applications;
+			throw_dbus_error('org.hsphfpd.Error.NotAvailable', qq(There is no application with audio agent for agent codec "$agent_codec")) unless grep { grep { $_->{type} eq 'audio' and $_->{codec} eq $agent_codec } @{$_->{agents}} } @sorted_applications;
 		} else {
-			($agent_codec) = map { map { ($_->{type} eq 'audio' and exists $agent_codecs->{$_->{codec}}) ? $_->{codec} : () } @{$_->{agents}} } @applications;
+			($agent_codec) = map { map { ($_->{type} eq 'audio' and exists $agent_codecs->{$_->{codec}}) ? $_->{codec} : () } @{$_->{agents}} } @sorted_applications;
 			throw_dbus_error('org.hsphfpd.Error.NotAvailable', qq(There is no application with audio agent and agent codec comapatile with air codec "$air_codec")) unless defined $agent_codec;
 			print "Choosing agent codec $agent_codec\n";
 		}
@@ -776,13 +845,13 @@ sub hsphfpd_connect_audio {
 			$rev_air_codecs{$_}->{$rev} = 1 foreach keys %{$air_codecs->{$rev}};
 		}
 		throw_dbus_error('org.hsphfpd.Error.NotSupported', qq(Agent codec "$agent_codec" is not supported by adapter)) unless $agent_codec eq '' or exists $rev_air_codecs{$agent_codec};
-		throw_dbus_error('org.hsphfpd.Error.NotAvailable', qq(There is no application with audio agent)) unless grep { grep { $_->{type} eq 'audio' } @{$_->{agents}} } @applications;
-		my @all_agent_codecs = map { map { ($_->{type} eq 'audio') ? $_->{codec} : () } @{$_->{agents}} } @applications;
+		throw_dbus_error('org.hsphfpd.Error.NotAvailable', qq(There is no application with audio agent)) unless grep { grep { $_->{type} eq 'audio' } @{$_->{agents}} } @sorted_applications;
+		my @all_agent_codecs = map { map { ($_->{type} eq 'audio') ? $_->{codec} : () } @{$_->{agents}} } @sorted_applications;
 		@all_agent_codecs = grep { $_ eq $agent_codec } @all_agent_codecs if $agent_codec ne '';
 		$air_codec = $endpoints{$endpoint}->{selected_codec};
 		if ((not exists $adapters{$adapter}->{codecs}->{$air_codec}) or
-		    ($agent_codec eq '' and not grep { grep { $_->{type} eq 'audio' and exists $air_codecs->{$air_codec}->{$_->{codec}} } @{$_->{agents}} } @applications) or
-		    (not exists $air_codecs->{$air_codec}->{$agent_codec} or not grep { grep { $_->{type} eq 'audio' and $_->{codec} eq $agent_codec } @{$_->{agents}} } @applications)) {
+		    ($agent_codec eq '' and not grep { grep { $_->{type} eq 'audio' and exists $air_codecs->{$air_codec}->{$_->{codec}} } @{$_->{agents}} } @sorted_applications) or
+		    (not exists $air_codecs->{$air_codec}->{$agent_codec} or not grep { grep { $_->{type} eq 'audio' and $_->{codec} eq $agent_codec } @{$_->{agents}} } @sorted_applications)) {
 			($air_codec) = grep { exists $endpoint_codecs->{$_} } map { exists $rev_air_codecs{$_} ? sort keys %{$rev_air_codecs{$_}} : () } @all_agent_codecs;
 			throw_dbus_error('org.hsphfpd.Error.NotAvailable', ($agent_codec eq '') ? qq(There is no application with audio agent for agent codec supported by adapter) : qq(There is no application with audio agent for agent codec "$agent_codec")) unless defined $air_codec;
 		}
@@ -830,11 +899,11 @@ sub hsphfpd_connect_audio {
 	bind $socket, pack 'S(H2)6', 31, reverse split /:/, $local_address or throw_dbus_error('org.hsphfpd.Error.Failed', qq(Binding SCO socket to adapter "$local_address" failed: $!));
 	hsphfpd_set_sco_codec($socket, $air_codec, $agent_codec) or throw_dbus_error('org.hsphfpd.Error.Failed', qq(Setting air codec to "$air_codec" and agent codec to "$agent_codec" on SCO socket failed: $!));
 	connect $socket, pack 'S(H2)6', 31, reverse split /:/, $remote_address or throw_dbus_error('org.hsphfpd.Error.Failed', qq(Connecting SCO socket to device "$remote_address" failed: $!));
-	hsphfpd_establish_audio($endpoint, $socket, $agent_codec);
+	return hsphfpd_establish_audio($endpoint, $socket, $agent_codec, @sorted_applications);
 }
 
 sub hsphfpd_establish_audio {
-	my ($endpoint, $socket, $agent_codec) = @_;
+	my ($endpoint, $socket, $agent_codec, @sorted_applications) = @_;
 
 	my $mtu;
 	# SOL_SCO => 17, SCO_OPTIONS => 1, struct sco_options { uint16_t mtu; }
@@ -857,30 +926,33 @@ sub hsphfpd_establish_audio {
 	$audio_suffix =~ s/^\Q$hsphfpd_manager_path\E//;
 
 	$endpoints{$endpoint}->{audio} = $audio;
-	$audios{$audio} = { endpoint => $endpoint, socket => $socket, air_codec => $air_codec, agent_codec => $agent_codec };
+	$audios{$audio} = { endpoint => $endpoint, socket => $socket, mtu => $mtu, air_codec => $air_codec, agent_codec => $agent_codec };
 	$audios{$audio}->{object} = main::Audio->new($hsphfpd_manager, $audio_suffix);
 	$reactor->add_exception(fileno $socket, sub { print "Socket exception on audio transport $audio\n"; hsphfpd_disconnect_audio($audio) });
 
 	print "Audio transport $audio created\n";
 
 	my $properties = {
-		MicrophoneGain => dbus_variant(dbus_uint16($endpoints{$endpoint}->{microphone_gain})),
-		SpeakerGain => dbus_variant(dbus_uint16($endpoints{$endpoint}->{speaker_gain})),
-		MTU => dbus_variant(dbus_uint16($mtu)),
-		Endpoint => dbus_variant(dbus_object_path($endpoint)),
-		Name => dbus_variant($endpoints{$endpoint}->{properties}->{Name}),
-		LocalAddress => dbus_variant($endpoints{$endpoint}->{properties}->{LocalAddress}),
-		RemoteAddress => dbus_variant($endpoints{$endpoint}->{properties}->{RemoteAddress}),
-		Profile => dbus_variant($endpoints{$endpoint}->{properties}->{Profile}),
-		Version => dbus_variant($endpoints{$endpoint}->{properties}->{Version}),
-		Role => dbus_variant($endpoints{$endpoint}->{properties}->{Role}),
-		AirCodec => dbus_variant(dbus_string($air_codec)),
+		VolumeControl => dbus_string($endpoints{$endpoint}->{volume_control}),
+		($endpoints{$endpoint}->{volume_control} ne 'none') ? (
+			MicrophoneGain => dbus_uint16($endpoints{$endpoint}->{microphone_gain}),
+			SpeakerGain => dbus_uint16($endpoints{$endpoint}->{speaker_gain}),
+		) : (),
+		MTU => dbus_uint16($mtu),
+		Endpoint => dbus_object_path($endpoint),
+		Name => $endpoints{$endpoint}->{properties}->{Name},
+		LocalAddress => $endpoints{$endpoint}->{properties}->{LocalAddress},
+		RemoteAddress => $endpoints{$endpoint}->{properties}->{RemoteAddress},
+		Profile => $endpoints{$endpoint}->{properties}->{Profile},
+		Version => $endpoints{$endpoint}->{properties}->{Version},
+		Role => $endpoints{$endpoint}->{properties}->{Role},
+		AirCodec => dbus_string($air_codec),
 	};
 
 	my $connected;
 	my $canceled;
 	my $error;
-	foreach (@applications) {
+	foreach (@sorted_applications) {
 		my $path = $_->{path};
 		my $service = $_->{service};
 		foreach (@{$_->{agents}}) {
@@ -911,6 +983,8 @@ sub hsphfpd_establish_audio {
 	print "Audio connection for transport $audio is established\n";
 	$endpoints{$endpoint}->{properties}->{AudioConnected} = dbus_boolean(1);
 	$endpoints{$endpoint}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.Endpoint', { AudioConnected => dbus_boolean(1) }, []);
+
+	return ($audio, $audios{$audio}->{application_service}, $audios{$audio}->{agent_path});
 }
 
 sub hsphfpd_disconnect_audio {
@@ -944,6 +1018,7 @@ sub hsphfpd_microphone_gain {
 	my ($audio, $new_gain) = @_;
 	throw_dbus_error('org.hsphfpd.Error.InvalidArguments', qq(Audio transport "$audio" does not exist)) unless exists $audios{$audio};
 	my $endpoint = $audios{$audio}->{endpoint};
+	throw_dbus_error('org.hsphfpd.Error.InvalidArguments', qq(Volume control for audio transport "$audio" is not supported)) if $endpoints{$endpoint}->{volume_control} eq 'none';
 	return $endpoints{$endpoint}->{microphone_gain} unless defined $new_gain;
 	throw_dbus_error('org.hsphfpd.Error.InvalidArguments', qq(Invalid value "$new_gain", it must be in range 0-15)) unless $new_gain =~ /^(?:[0-9]|1[0-5])$/;
 	return if $endpoints{$endpoint}->{microphone_gain} == $new_gain;
@@ -955,7 +1030,10 @@ sub hsphfpd_microphone_gain {
 		hsphfpd_socket_write($endpoint, "+VGM: $new_gain") or throw_dbus_error('org.hsphfpd.Error.Failed', 'Failed');
 	} else {
 		hsphfpd_socket_write($endpoint, "AT+VGM=$new_gain") or throw_dbus_error('org.hsphfpd.Error.Failed', 'Failed');
-		hsphfpd_socket_wait_for_ok_error($endpoint) or throw_dbus_error('org.hsphfpd.Error.Failed', 'Failed');
+		if (not hsphfpd_socket_wait_for_ok_error($endpoint)) {
+			hsphfpd_volume_control_changed($endpoint, 'none');
+			throw_dbus_error('org.hsphfpd.Error.Failed', 'Failed');
+		}
 	}
 	$endpoints{$endpoint}->{microphone_gain} = $new_gain;
 	$audios{$audio}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.AudioTransport', { MicrophoneGain => dbus_uint16($new_gain) }, []);
@@ -965,6 +1043,7 @@ sub hsphfpd_speaker_gain {
 	my ($audio, $new_gain) = @_;
 	throw_dbus_error('org.hsphfpd.Error.InvalidArguments', qq(Audio transport "$audio" does not exist)) unless exists $audios{$audio};
 	my $endpoint = $audios{$audio}->{endpoint};
+	throw_dbus_error('org.hsphfpd.Error.InvalidArguments', qq(Volume control for audio transport "$audio" is not supported)) if $endpoints{$endpoint}->{volume_control} eq 'none';
 	return $endpoints{$endpoint}->{speaker_gain} unless defined $new_gain;
 	throw_dbus_error('org.hsphfpd.Error.InvalidArguments', qq(Invalid value "$new_gain", it must be in range 0-15)) unless $new_gain =~ /^(?:[0-9]|1[0-5])$/;
 	return if $endpoints{$endpoint}->{speaker_gain} == $new_gain;
@@ -976,7 +1055,10 @@ sub hsphfpd_speaker_gain {
 		hsphfpd_socket_write($endpoint, "+VGS: $new_gain") or throw_dbus_error('org.hsphfpd.Error.Failed', 'Failed');
 	} else {
 		hsphfpd_socket_write($endpoint, "AT+VGS=$new_gain") or throw_dbus_error('org.hsphfpd.Error.Failed', 'Failed');
-		hsphfpd_socket_wait_for_ok_error($endpoint) or throw_dbus_error('org.hsphfpd.Error.Failed', 'Failed');
+		if (not hsphfpd_socket_wait_for_ok_error($endpoint)) {
+			hsphfpd_volume_control_changed($endpoint, 'none');
+			throw_dbus_error('org.hsphfpd.Error.Failed', 'Failed');
+		}
 	}
 	$endpoints{$endpoint}->{speaker_gain} = $new_gain;
 	$audios{$audio}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.AudioTransport', { SpeakerGain => dbus_uint16($new_gain) }, []);
@@ -1048,11 +1130,29 @@ sub hsphfpd_socket_wait_for_ok_error {
 		my $ret = hsphfpd_socket_ready_read($endpoint);
 		return $ret if defined $ret;
 	}
-	return 0;
+	return;
+}
+
+sub hsphfpd_volume_control_changed {
+	my ($endpoint, $new_volume_control) = @_;
+	if (exists $endpoints{$endpoint}->{audio}) {
+		my $access = ($new_volume_control eq 'none') ? 'write' : 'readwrite'; # write access will hide property in GetAll() method
+		$audios{$endpoints{$endpoint}->{audio}}->{object}->{introspector}->{interfaces}->{'org.hsphfpd.AudioTransport'}->{props}->{MicrophoneGain}->{access} = $access;
+		$audios{$endpoints{$endpoint}->{audio}}->{object}->{introspector}->{interfaces}->{'org.hsphfpd.AudioTransport'}->{props}->{SpeakerGain}->{access} = $access;
+		if ($endpoints{$endpoint}->{volume_control} ne $new_volume_control) {
+			if ($new_volume_control eq 'none') {
+				$audios{$endpoints{$endpoint}->{audio}}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.AudioTransport', { VolumeControl => dbus_string($new_volume_control) }, [ dbus_string('MicrophoneGain'), dbus_string('SpeakerGain') ]);
+			} else {
+				$audios{$endpoints{$endpoint}->{audio}}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.AudioTransport', { VolumeControl => dbus_string($new_volume_control), MicrophoneGain => dbus_uint16($endpoints{$endpoint}->{microphone_gain}) , SpeakerGain => dbus_uint16($endpoints{$endpoint}->{speaker_gain}) }, []);
+			}
+		}
+	}
+	$endpoints{$endpoint}->{volume_control} = $new_volume_control;
 }
 
 sub hsphfpd_speaker_gain_changed {
 	my ($endpoint, $new_gain) = @_;
+	$new_gain = 0 if $new_gain < 0;
 	$new_gain = 15 if $new_gain > 15;
 	return if $endpoints{$endpoint}->{speaker_gain} == $new_gain;
 	print "Setting speaker gain to $new_gain\n";
@@ -1062,6 +1162,7 @@ sub hsphfpd_speaker_gain_changed {
 
 sub hsphfpd_microphone_gain_changed {
 	my ($endpoint, $new_gain) = @_;
+	$new_gain = 0 if $new_gain < 0;
 	$new_gain = 15 if $new_gain > 15;
 	return if $endpoints{$endpoint}->{microphone_gain} == $new_gain;
 	print "Setting microphone gain to $new_gain\n";
@@ -1082,8 +1183,10 @@ sub hsphfpd_button_pressed {
 
 sub hsphfpd_update_features {
 	my ($endpoint) = @_;
-	my @features = (keys %{$endpoints{$endpoint}->{csr_features}}, keys %{$endpoints{$endpoint}->{hf_features}}, keys %{$endpoints{$endpoint}->{apple_features}}, keys %{$endpoints{$endpoint}->{hf_indicators}});
-	$endpoints{$endpoint}->{properties}->{Features} = dbus_array([ map { dbus_string($_) } sort @features ]);
+	my %features = map { $_ => 1 } keys %{$endpoints{$endpoint}->{csr_features}}, keys %{$endpoints{$endpoint}->{hf_features}}, keys %{$endpoints{$endpoint}->{ag_features}}, keys %{$endpoints{$endpoint}->{apple_features}}, keys %{$endpoints{$endpoint}->{hf_indicators}};
+	$features{'volume-control'} = 1 if $endpoints{$endpoint}->{hs_volume_control};
+	$features{'wide-band-speech'} = 1 if $endpoints{$endpoint}->{hfp_wide_band_speech};
+	$endpoints{$endpoint}->{properties}->{Features} = dbus_array([ map { dbus_string($_) } sort keys %features ]);
 	$endpoints{$endpoint}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.Endpoint', { Features => $endpoints{$endpoint}->{properties}->{Features} }, []);
 }
 
@@ -1133,7 +1236,7 @@ sub hsphfpd_csr_battery_level_changed {
 sub hsphfpd_csr_supported_features {
 	my ($endpoint, $caller_name, $raw_text, $sms_ind, $batt_level, $pwr_source, $codecs, $bandwidths) = @_;
 	my %csr_features;
-	$csr_features{'caller-name'} = 1 if $caller_name;
+	$csr_features{'csr-caller-name'} = 1 if $caller_name;
 	$csr_features{'csr-display-text'} = 1 if $raw_text;
 	$csr_features{'csr-sms-indication'} = 1 if $sms_ind;
 	$csr_features{'csr-battery-level'} = 1 if $batt_level;
@@ -1166,7 +1269,7 @@ sub hsphfpd_csr_indicators_changed {
 	my $codecs;
 	my $bandwidths;
 	my $features_changed;
-	my @csr_features_map = qw(zero-index caller-name csr-display-text csr-sms-indication csr-battery-level csr-power-source);
+	my @csr_features_map = qw(zero-index csr-caller-name csr-display-text csr-sms-indication csr-battery-level csr-power-source);
 	foreach ($indicators =~ /\(([0-9]+,\s*[0-9]+)\)/g) {
 		my ($ind, $val) = split /,\s*/, $_;
 		if ($ind >= 1 and $ind <= $#csr_features_map) {
@@ -1340,10 +1443,14 @@ sub hsphfpd_socket_ready_read {
 		if ($profile eq 'hsp_hs') {
 			# Some HSP devices really send +VGS= and +VGM= commands without AT prefix
 			if ($line =~ /^(?:AT)?\+VGS=([0-9]+)$/) {
-				hsphfpd_speaker_gain_changed($endpoint, $1);
+				my $new_gain = $1;
+				hsphfpd_volume_control_changed($endpoint, 'remote');
+				hsphfpd_speaker_gain_changed($endpoint, $new_gain);
 				hsphfpd_socket_write($endpoint, 'OK') or return;
 			} elsif ($line =~ /^(?:AT)?\+VGM=([0-9]+)$/) {
-				hsphfpd_microphone_gain_changed($endpoint, $1);
+				my $new_gain = $1;
+				hsphfpd_volume_control_changed($endpoint, 'remote');
+				hsphfpd_microphone_gain_changed($endpoint, $new_gain);
 				hsphfpd_socket_write($endpoint, 'OK') or return;
 			} elsif ($line eq 'AT+CKPD=200') {
 				hsphfpd_button_pressed($endpoint);
@@ -1352,6 +1459,8 @@ sub hsphfpd_socket_ready_read {
 				my $response = hsphfpd_csr_supported_features($endpoint, $1, $2, $3, $4, $5, $6, $7);
 				hsphfpd_socket_write($endpoint, "+CSRSF: $response") or return;
 				hsphfpd_socket_write($endpoint, 'OK') or return;
+				hsphfpd_socket_write($endpoint, '+CSRPWR?') if exists $endpoints{$endpoint}->{csr_features}->{'csr-power-source'};
+				hsphfpd_socket_write($endpoint, '+CSRBATT?') if exists $endpoints{$endpoint}->{csr_features}->{'csr-battery-level'};
 			} elsif ($line eq 'AT+CSR=0') {
 				hsphfpd_csr_disable($endpoint);
 				hsphfpd_socket_write($endpoint, 'OK') or return;
@@ -1370,6 +1479,42 @@ sub hsphfpd_socket_ready_read {
 				# In HSP mode we do not support telephony functions
 				print "Requested for content of SMS with index $1 but telephony functions are not supported in HSP profile\n";
 				hsphfpd_socket_write($endpoint, 'ERROR') or return;
+			} elsif ($line =~ /^AT\+XAPL=[0-9A-Fa-f]+-[0-9A-Fa-f]+-[0-9]+,\s*([0-9]+)$/) {
+				my $apple_features = int($1);
+				print "Apple features changed event\n";
+				my %apple_features;
+				foreach (sort { $a <=> $b } keys %apple_features_mask) { $apple_features{$apple_features_mask{$_}} = 1 if $apple_features & int($_); }
+				print "Supported Apple features:\n" . (join "\n", sort keys %apple_features) . "\n";
+				$endpoints{$endpoint}->{apple_features} = \%apple_features;
+				hsphfpd_update_features($endpoint);
+				hsphfpd_socket_write($endpoint, "+XAPL=iPhone," . int(0b11110)) or return;
+			} elsif ($line =~ /^AT\+IPHONEACCEV=([0-9]+)(,\s*[0-9]+,\s*[0-9]+(?2)?)?$/) {
+				my ($count, $indicators) = ($1, $2);
+				print "Apple indicators changed event\n";
+				my @indicators = ($indicators =~ /([0-9]+,\s*[0-9]+)/g);
+				if (scalar @indicators != $count) {
+					hsphfpd_socket_write($endpoint, 'ERROR') or return;
+				} else {
+					foreach (@indicators) {
+						my ($key, $val) = split /,\s*/, $_;
+						if ($key == 1 and $val >=0 and $val <= 9) {
+							print "Apple battery level changed\n";
+							# Apple battery level is only in range 0-9 but HF battery level is range 0-100, so prefer usage of HF
+							if (not exists $endpoints{$endpoint}->{hf_indicators}->{'battery-level'}) {
+								$endpoints{$endpoint}->{properties}->{BatteryLevel} = dbus_int16(($val >= 0 && $val <= 9) ? ($val * 100 / 9) : -1);
+								$endpoints{$endpoint}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.Endpoint', { BatteryLevel => $endpoints{$endpoint}->{properties}->{BatteryLevel} }, []);
+							}
+						} elsif ($key == 2 and $val >= 0 and $val <= 1) {
+							print "Apple dock state changed\n";
+							# We map docked state to external power source and undocked state to battery power source
+							$endpoints{$endpoint}->{properties}->{PowerSource} = dbus_string($val ? 'external' : 'battery');
+							$endpoints{$endpoint}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.Endpoint', { PowerSource => $endpoints{$endpoint}->{properties}->{PowerSource} }, []);
+						} else {
+							print "Unknown Apple indicator $key\n";
+						}
+					}
+					hsphfpd_socket_write($endpoint, 'OK') or return;
+				}
 			} elsif ($line eq 'ERROR') {
 				print "Received ERROR\n";
 				# Some devices send invalid ERROR command in HS role. Do not send anything as it just generates another ERROR
@@ -1414,6 +1559,14 @@ sub hsphfpd_socket_ready_read {
 			} elsif ($line =~ /^\+CSRTXT:\s*(.*)$/) {
 				my $text = $1;
 				$endpoints{$endpoint}->{object}->emit_signal('DisplayText', 'org.hsphfpd.GatewayEndpoint', $text);
+			} elsif ($line =~ /^\+XAPL=[^\n\r,]*,\s*([0-9]+)$/) {
+				my $apple_features = int($1);
+				print "Apple features changed event\n";
+				my %apple_features;
+				foreach (sort { $a <=> $b } keys %apple_features_mask) { $apple_features{$apple_features_mask{$_}} = 1 if $apple_features & int($_); }
+				print "Supported Apple features:\n" . (join "\n", sort keys %apple_features) . "\n";
+				$endpoints{$endpoint}->{apple_features} = \%apple_features;
+				hsphfpd_update_features($endpoint);
 			} elsif ($line eq 'OK') {
 				print "Received OK\n";
 				return 1;
@@ -1433,6 +1586,7 @@ sub hsphfpd_socket_ready_read {
 				print "Supported HF features:\n" . (join "\n", sort keys %hf_features) . "\n";
 				$endpoints{$endpoint}->{hf_features} = \%hf_features;
 				hsphfpd_update_features($endpoint);
+				hsphfpd_volume_control_changed($endpoint, (exists $hf_features{'volume-control'} ? 'remote' : 'none'));
 				# We report all defined AG features are supported
 				hsphfpd_socket_write($endpoint, "+BRSF: " . int(0b111111111111)) or return;
 				hsphfpd_socket_write($endpoint, 'OK') or return;
@@ -1516,7 +1670,7 @@ sub hsphfpd_socket_ready_read {
 				} else {
 					# We have already selected non-HF codec
 					# Now establish SCO connection
-					eval { hsphfpd_connect_audio($endpoint, $codec, '') };
+					eval { hsphfpd_connect_audio($endpoint, '', $codec, '') };
 				}
 			} elsif ($line =~ /^AT\+BCS=([0-9]+)$/) {
 				my $hf_codec_id = int($1);
@@ -1532,7 +1686,7 @@ sub hsphfpd_socket_ready_read {
 					hsphfpd_socket_write($endpoint, 'OK') or return;
 					return 1 if $endpoints{$endpoint}->{codec_negotiation};
 					# Now establish SCO connection
-					eval { hsphfpd_connect_audio($endpoint, $hf_codec, '') };
+					eval { hsphfpd_connect_audio($endpoint, '', $hf_codec, '') };
 				} else {
 					print "Requested codec is not supported\n";
 					hsphfpd_socket_write($endpoint, 'ERROR') or return;
@@ -1558,15 +1712,21 @@ sub hsphfpd_socket_ready_read {
 					hsphfpd_socket_write($endpoint, 'ERROR') or return;
 				}
 			} elsif ($line =~ /^AT\+VGS=([0-9]+)$/) {
-				hsphfpd_speaker_gain_changed($endpoint, $1);
+				my $new_gain = $1;
+				hsphfpd_volume_control_changed($endpoint, 'remote');
+				hsphfpd_speaker_gain_changed($endpoint, $new_gain);
 				hsphfpd_socket_write($endpoint, 'OK') or return;
 			} elsif ($line =~ /^AT\+VGM=([0-9]+)$/) {
-				hsphfpd_microphone_gain_changed($endpoint, $1);
+				my $new_gain = $1;
+				hsphfpd_volume_control_changed($endpoint, 'remote');
+				hsphfpd_microphone_gain_changed($endpoint, $new_gain);
 				hsphfpd_socket_write($endpoint, 'OK') or return;
 			} elsif ($line =~ /^AT\+CSRSF=([0-9]+),\s*([0-9]+),\s*([0-9]+),\s*([0-9]+),\s*([0-9]+)(?:,\s*([0-9]+)(?:,\s*([0-9]+))?)?/) {
 				my $response = hsphfpd_csr_supported_features($endpoint, $1, $2, $3, $4, $5, $6, $7);
 				hsphfpd_socket_write($endpoint, "+CSRSF: $response") or return;
 				hsphfpd_socket_write($endpoint, 'OK') or return;
+				hsphfpd_socket_write($endpoint, '+CSRPWR?') if exists $endpoints{$endpoint}->{csr_features}->{'csr-power-source'};
+				hsphfpd_socket_write($endpoint, '+CSRBATT?') if exists $endpoints{$endpoint}->{csr_features}->{'csr-battery-level'};
 			} elsif ($line eq 'AT+CSR=0') {
 				hsphfpd_csr_disable($endpoint);
 				hsphfpd_socket_write($endpoint, 'OK') or return;
@@ -1803,11 +1963,40 @@ sub hsphfpd_connect_endpoint {
 	$endpoints{$endpoint}->{properties}->{Connected} = dbus_boolean(1);
 	$endpoints{$endpoint}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.Endpoint', { Connected => dbus_boolean(1) }, []);
 	my $profile = $endpoints{$endpoint}->{profile};
+
+	if ($profile eq 'hfp_hf') {
+		my %hf_features;
+		foreach (sort { $a <=> $b } keys %hf_profile_features_mask) { $hf_features{$hf_profile_features_mask{$_}} = 1 if $endpoints{$endpoint}->{profile_features} & int($_); }
+		$endpoints{$endpoint}->{hfp_wide_band_speech} = exists $hf_features{'wide-band-speech'};
+		print "Supported HF profile features:\n" . (join "\n", sort keys %hf_features) . "\n";
+		$endpoints{$endpoint}->{hf_features} = \%hf_features;
+		hsphfpd_update_features($endpoint);
+		hsphfpd_volume_control_changed($endpoint, 'remote') if exists $endpoints{$endpoint}->{hf_features}->{'volume-control'};
+	} elsif ($profile eq 'hfp_ag') {
+		my %ag_features;
+		foreach (sort { $a <=> $b } keys %ag_profile_features_mask) { $ag_features{$ag_profile_features_mask{$_}} = 1 if $endpoints{$endpoint}->{profile_features} & int($_); }
+		$endpoints{$endpoint}->{hfp_wide_band_speech} = exists $ag_features{'wide-band-speech'};
+		print "Supported AG profile features:\n" . (join "\n", sort keys %ag_features) . "\n";
+		$endpoints{$endpoint}->{ag_features} = \%ag_features;
+		hsphfpd_update_features($endpoint);
+	} elsif ($profile eq 'hsp_hs') {
+		# NOTE: bluez since 5.55 sets first bit to value from SDP attribute 0x0302 "Remote audio volume control"
+		$endpoints{$endpoint}->{hs_volume_control} = $endpoints{$endpoint}->{profile_features} & int(0b1);
+		print "Supported HS profile features:\n" . ($endpoints{$endpoint}->{hs_volume_control} ? 'volume-control' : '') . "\n";
+		hsphfpd_update_features($endpoint);
+		hsphfpd_volume_control_changed($endpoint, 'remote') if $endpoints{$endpoint}->{hs_volume_control};
+	}
+
 	if ($profile eq 'hsp_ag') {
 		hsphfpd_socket_write($endpoint, "AT+VGS=" . $endpoints{$endpoint}->{speaker_gain}) or throw_dbus_error('org.bluez.Error.Canceled', 'Canceled');
-		hsphfpd_socket_wait_for_ok_error($endpoint);
+		if (not hsphfpd_socket_wait_for_ok_error($endpoint)) {
+			hsphfpd_volume_control_changed($endpoint, 'none');
+		}
 		hsphfpd_socket_write($endpoint, "AT+VGM=" . $endpoints{$endpoint}->{microphone_gain}) or throw_dbus_error('org.bluez.Error.Canceled', 'Canceled');
-		hsphfpd_socket_wait_for_ok_error($endpoint);
+		if (not hsphfpd_socket_wait_for_ok_error($endpoint)) {
+			hsphfpd_volume_control_changed($endpoint, 'none');
+		}
+		# TODO: send AT+XAPL=
 		# In HSP mode we do not support telephony functions, so caller_name and sms_ind is not announced
 		hsphfpd_socket_write($endpoint, "AT+CSRSF=0,1,0,1,1,7,3") or throw_dbus_error('org.bluez.Error.Canceled', 'Canceled');
 		hsphfpd_socket_wait_for_ok_error($endpoint);
@@ -1838,8 +2027,9 @@ sub hsphfpd_connect_endpoint {
 		# ...
 		# receive: OK
 		# send: AT+XAPL=0000-0000-0000,30
-		# receive: OK|ERROR or nothing/timeout
+		# receive: +XAPL=|ERROR or nothing/timeout
 		# send: AT+CSRSF=1,1,1,1,1,7,3
+		# receive: +CSRSF:|ERROR or nothing/timeout
 		# receive: OK|ERROR or nothing/timeout
 	} else {
 		my $uinput;
@@ -1872,6 +2062,7 @@ sub hsphfpd_connect_endpoint {
 			close $uinput;
 		}
 	}
+
 	if ($profile =~ /^hfp_/) {
 		my $timer_id; # postpone connecting telephony agent for 3s
 		$timer_id = $reactor->add_timeout(3000, sub {
@@ -1879,6 +2070,7 @@ sub hsphfpd_connect_endpoint {
 			$reactor->remove_timeout($timer_id);
 		});
 	}
+
 	$devices{$endpoints{$endpoint}->{device}}->{selected_profile} = $profile;
 }
 
@@ -1969,11 +2161,59 @@ sub bluez_release_profiles {
 }
 
 sub bluez_register_profiles {
-	bluez_register_profile('hsp_ag', '00001108-0000-1000-8000-00805f9b34fb', { Name => dbus_string('Headset unit'), Version => dbus_uint16(0x0102), AutoConnect => dbus_boolean(0), Channel => dbus_uint16(6) }); # bluez does not have SDP record for HSP_HS profile
-	bluez_register_profile('hsp_hs', '00001112-0000-1000-8000-00805f9b34fb', { Version => dbus_uint16(0x0102) }); # bluez does not set version in SDP record for HSP_AG profile
-	# TODO: implement HFP AG role
-	#bluez_register_profile('hfp_ag', '0000111e-0000-1000-8000-00805f9b34fb', { Version => dbus_uint16(0x0107), AutoConnect => dbus_boolean(0), Features => dbus_uint16(0b111111) }); # bluez prior to version 5.50 sets version in SDP record for HFP_HF to 1.5
+	# Service Record definition for Headset role of HSP 1.2 profile with Erratum 3507
+	# Attribute 0x0302 is Remote Audio Volume Control, default value is false
+	my $hsp_ag_name = 'Headset unit';
+	my $hsp_ag_version = '0x0102';
+	my $hsp_ag_channel = '0x06';
+	my $hsp_ag_record = <<"EOD";
+<?xml version="1.0" encoding="UTF-8" ?>
+<record>
+	<attribute id="0x0001">
+		<sequence>
+			<uuid value="0x1108" />
+			<uuid value="0x1131" />
+			<uuid value="0x1203" />
+		</sequence>
+	</attribute>
+	<attribute id="0x0004">
+		<sequence>
+			<sequence>
+				<uuid value="0x0100" />
+			</sequence>
+			<sequence>
+				<uuid value="0x0003" />
+				<uint8 value="$hsp_ag_channel" />
+			</sequence>
+		</sequence>
+	</attribute>
+	<attribute id="0x0005">
+		<sequence>
+			<uuid value="0x1002" />
+		</sequence>
+	</attribute>
+	<attribute id="0x0009">
+		<sequence>
+			<sequence>
+				<uuid value="0x1108" />
+				<uint16 value="$hsp_ag_version" />
+			</sequence>
+		</sequence>
+	</attribute>
+	<attribute id="0x0100">
+		<text value="$hsp_ag_name" />
+	</attribute>
+	<attribute id="0x0302">
+		<boolean value="true" />
+	</attribute>
+</record>
+EOD
+
 	bluez_register_profile('hfp_hf', '0000111f-0000-1000-8000-00805f9b34fb', { Version => dbus_uint16(0x0107), Features => dbus_uint16(0b111111) }); # bluez prior to version 5.50 sets version in SDP record for HFP_AG to 1.5
+	bluez_register_profile('hsp_hs', '00001112-0000-1000-8000-00805f9b34fb', { Version => dbus_uint16(0x0102) }); # bluez prior to version 5.26 does not set version in SDP record for HSP_AG profile
+	# TODO: implement HFP AG role
+	#bluez_register_profile('hfp_ag', '0000111e-0000-1000-8000-00805f9b34fb', { Version => dbus_uint16(0x0107), Features => dbus_uint16(0b111111) }); # bluez prior to version 5.50 sets version in SDP record for HFP_HF to 1.5
+	bluez_register_profile('hsp_ag', '00001108-0000-1000-8000-00805f9b34fb', { Name => dbus_string($hsp_ag_name), Version => dbus_uint16(hex($hsp_ag_version)), Features => dbus_uint16(0b1), AutoConnect => dbus_boolean(1), Channel => dbus_uint16(hex($hsp_ag_channel)), ServiceRecord => dbus_string($hsp_ag_record) }); # bluez prior to version 5.55 does not have SDP record for HSP_HS profile
 }
 
 sub bluez_obj_weight {
@@ -2006,29 +2246,6 @@ sub bluez_interfaces_added {
 		last unless ref $adapter_props eq 'HASH' and exists $adapter_props->{Address};
 		my $address = $adapter_props->{Address};
 		last unless ref $address eq '';
-		print "Creating listening SCO socket for adapter $adapter\n";
-		# PF_BLUETOOTH => 31, SOCK_SEQPACKET => 5, BTPROTO_SCO => 2
-		socket my $socket, 31, 5, 2 or print "Opening SCO listening socket failed: $!\n";
-		if ($socket) {
-			# AF_BLUETOOTH => 31, struct sockaddr_sco { sa_family_t sco_family; bdaddr_t sco_bdaddr; }, sa_family_t = uint16_t, bdaddr_t = uint8_t[6] (in reverse order)
-			bind $socket, pack 'S(H2)6', 31, reverse split /:/, $address or do { print "Binding listening SCO socket to adapter address $address failed: $!\n"; close $socket; undef $socket; };
-		}
-		# SOL_BLUETOOTH => 274, BT_DEFER_SETUP => 7, int
-		my $kernel_defer_support = defined $socket && defined setsockopt $socket, 274, 7, pack 'i', 1;
-		# SOL_BLUETOOTH => 274, BT_VOICE => 11, struct bt_voice { uint16_t setting; }
-		my $kernel_msbc_support = $kernel_defer_support && defined getsockopt $socket, 274, 11;
-		# SOL_BLUETOOTH => 274, BT_VOICE_SETUP => 14, ...
-		my $kernel_anycodec_support = $kernel_defer_support && defined getsockopt $socket, 274, 14;
-		if ($socket) {
-			if (listen $socket, 10) {
-				$reactor->add_read(fileno $socket, sub { hsphfpd_accept_audio($socket, $address, $kernel_defer_support) });
-				$reactor->add_exception(fileno $socket, sub { print "Exception on listening SCO socket\n"; $reactor->remove_read(fileno $socket); $reactor->remove_exception(fileno $socket); });
-			} else {
-				print "Listening on SCO socket failed: $!\n";
-				close $socket;
-				undef $socket;
-			}
-		}
 		my %codecs;
 		if ($kernel_anycodec_support) {
 			# TODO: use HCI commands to checks which codecs are really supported by adapter
@@ -2059,7 +2276,7 @@ sub bluez_interfaces_added {
 		$codecs{CVSD}->{PCM_s16le_8kHz} = 1; # This default codec should be always supported by adapter
 		print "Supported codecs combination for adapter $adapter:\n";
 		print "Air codec $_ with agent codecs: " . (join ', ', sort keys %{$codecs{$_}}) . "\n" foreach sort keys %codecs;
-		$adapters{$adapter} = { address => $address, devices => {}, socket => $socket, codecs => \%codecs };
+		$adapters{$adapter} = { address => $address, devices => {}, codecs => \%codecs };
 		print "added: adapter=$adapter address=$address\n";
 	}}
 	if (exists $interfaces->{'org.bluez.Device1'}) {{
@@ -2080,6 +2297,7 @@ sub bluez_interfaces_added {
 		last unless ref $uuids eq 'ARRAY';
 		foreach (@{$uuids}) {
 			my ($profile, $profile_name, $role_name, $class);
+			my $volume_control = 'none';
 			my $ag_indicators;
 			if ($_ eq '00001108-0000-1000-8000-00805f9b34fb' or $_ eq '00001131-0000-1000-8000-00805f9b34fb') {
 				$profile = 'hsp_hs';
@@ -2091,6 +2309,7 @@ sub bluez_interfaces_added {
 				$profile_name = 'headset';
 				$role_name = 'gateway';
 				$class = 'main::HSPGatewayEndpoint';
+				$volume_control = 'local';
 			} elsif ($_ eq '0000111e-0000-1000-8000-00805f9b34fb') {
 				$profile = 'hfp_hf';
 				$profile_name = 'handsfree';
@@ -2102,6 +2321,7 @@ sub bluez_interfaces_added {
 				$profile_name = 'handsfree';
 				$role_name = 'gateway';
 				$class = 'main::HFPGatewayEndpoint';
+				$volume_control = 'local';
 			} else {
 				next;
 			}
@@ -2115,7 +2335,7 @@ sub bluez_interfaces_added {
 			$devices{$device}->{adapter} = $adapter;
 			$devices{$device}->{profiles}->{$profile} = $endpoint;
 			# TODO: load codecs, gains, profile, version, last codec and features from local cache
-			$endpoints{$endpoint} = { device => $device, modalias => $modalias, profile => $profile, ag_indicators => $ag_indicators // {}, ag_indicators_reporting => 0, hf_features => {}, csr_features => {}, apple_features => {}, hf_indicators => {}, hf_codecs => [], csr_codecs => [], microphone_gain => 8, speaker_gain => 8, selected_codec => 'CVSD', codecs => { CVSD => 1 } };
+			$endpoints{$endpoint} = { device => $device, modalias => $modalias, profile => $profile, ag_indicators => $ag_indicators // {}, volume_control => $volume_control, ag_indicators_reporting => 0, hf_features => {}, ag_features => {}, csr_features => {}, apple_features => {}, hf_indicators => {}, hf_codecs => [], csr_codecs => [], microphone_gain => 8, speaker_gain => 8, selected_codec => 'CVSD', codecs => { CVSD => 1 } };
 			$endpoints{$endpoint}->{properties} = { Name => dbus_string($name), LocalAddress => dbus_string($adapter_address), RemoteAddress => dbus_string($address), Connected => dbus_boolean(0), AudioConnected => dbus_boolean(0), TelephonyConnected => dbus_boolean(0), Profile => dbus_string($profile_name), Version => dbus_string(''), Role => dbus_string($role_name), PowerSource => dbus_string('unknown'), BatteryLevel => dbus_int16(-1), Features => dbus_array([]), AudioCodecs => dbus_array([ dbus_string('CVSD') ]) };
 			$endpoints{$endpoint}->{object} = $class->new($hsphfpd_manager, $endpoint_suffix);
 			$hsphfpd_manager->emit_signal('InterfacesAdded', $endpoint, { 'org.hsphfpd.Endpoint' => $endpoints{$endpoint}->{properties} });
@@ -2136,13 +2356,6 @@ sub bluez_interfaces_removed {
 		} elsif ($_ eq 'org.bluez.Adapter1' and exists $adapters{$path}) {
 			my $adapter = $path;
 			bluez_interfaces_removed($_, [ 'org.bluez.Device1' ]) foreach sort keys %{$adapters{$adapter}->{devices}};
-			my $socket = $adapters{$adapter}->{socket};
-			if (defined $socket) {
-				print "Closing SCO listening socket for adapter $adapter\n";
-				$reactor->remove_read(fileno $socket);
-				$reactor->remove_exception(fileno $socket);
-				close $socket;
-			}
 			delete $adapters{$adapter};
 			print "removed: adapter=$adapter\n";
 		} elsif ($_ eq 'org.bluez.Device1' and exists $devices{$path}) {
@@ -2182,7 +2395,7 @@ sub main::Manager::GetManagedObjects { hsphfpd_get_endpoints() }
 	use parent 'Net::DBus::Object';
 	use Net::DBus::Exporter 'org.hsphfpd.Endpoint';
 	BEGIN {
-		dbus_method('ConnectAudio', [ 'string', 'string' ], [], { strict_exceptions => 1, param_names => [ 'air_codec', 'agent_codec' ] });
+		dbus_method('ConnectAudio', [ 'caller', 'string', 'string' ], [ 'objectpath', 'string', 'objectpath' ], { strict_exceptions => 1, param_names => [ 'air_codec', 'agent_codec' ] });
 		dbus_property('Name', 'string', 'read', { strict_exceptions => 1 });
 		dbus_property('RemoteAddress', 'string', 'read', { strict_exceptions => 1 });
 		dbus_property('LocalAddress', 'string', 'read', { strict_exceptions => 1 });
@@ -2260,8 +2473,10 @@ sub main::HSPGatewayEndpoint::SendButtonPressEvent { hsphfpd_send_button_event(s
 	use Net::DBus::Exporter 'org.hsphfpd.AudioTransport';
 	BEGIN {
 		dbus_method('Release', [], [], { strict_exceptions => 1 });
+		dbus_property('VolumeControl', 'string', 'read', { strict_exceptions => 1 });
 		dbus_property('MicrophoneGain', 'uint16', 'readwrite', { strict_exceptions => 1 });
 		dbus_property('SpeakerGain', 'uint16', 'readwrite', { strict_exceptions => 1 });
+		dbus_property('MTU', 'uint16', 'read', { strict_exceptions => 1 });
 		dbus_property('AirCodec', 'string', 'read', { strict_exceptions => 1 });
 		dbus_property('AgentCodec', 'string', 'read', { strict_exceptions => 1 });
 		dbus_property('Endpoint', 'objectpath', 'read', { strict_exceptions => 1 });
@@ -2269,8 +2484,10 @@ sub main::HSPGatewayEndpoint::SendButtonPressEvent { hsphfpd_send_button_event(s
 	}
 }
 sub main::Audio::Release { hsphfpd_disconnect_audio(shift->get_object_path()) }
+sub main::Audio::VolumeControl { $endpoints{$audios{shift->get_object_path()}->{endpoint}}->{volume_control} }
 sub main::Audio::MicrophoneGain { hsphfpd_microphone_gain(shift->get_object_path(), @_) }
 sub main::Audio::SpeakerGain { hsphfpd_speaker_gain(shift->get_object_path(), @_) }
+sub main::Audio::MTU { $audios{shift->get_object_path()}->{mtu} }
 sub main::Audio::AirCodec { $audios{shift->get_object_path()}->{air_codec} }
 sub main::Audio::AgentCodec { $audios{shift->get_object_path()}->{agent_codec} }
 sub main::Audio::Endpoint { $audios{shift->get_object_path()}->{endpoint} }

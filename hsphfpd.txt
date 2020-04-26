@@ -239,15 +239,18 @@ bluetooth device with address 00:11:22:33:44:55. If bluetooth device supports
 more profiles and roles then bluetooth devices is exported more times.
 
 Methods
-		void ConnectAudio(string air_codec, string agent_codec)
+		object, string, object ConnectAudio(string air_codec, string agent_codec)
 
 			Connect audio transport with supplied air and agent
 			codecs. Endpoint must support air codec, adapter must
 			support air and agent codecs and some audio application
-			must provide agent with supported agent codec. Audio
-			transport socket is then passed to registered audio
-			application agent which is responsible for processing
-			audio.
+			must provide some agent which supports supplied agent
+			codec. Audio transport socket is then passed to some
+			registered audio application agent which is responsible
+			for processing audio. When this method is called by
+			registered audio application then their agents are
+			preferred when choosing agent which would get audio
+			transport socket.
 
 			Air codec represents a format used for transmitting data
 			over the air. Agent codec represents a format used by
@@ -258,13 +261,17 @@ Methods
 			Standard air codec is CVSD and standard agent codec is
 			PCM_s16le_8kHz.
 
-			When this method is called with empty codec name then
-			codec is chosen automatically to some supported
-			combination.
+			When this method is called with empty codec name (either
+			air or agent or both of them) then particular codec is
+			chosen automatically to some supported combination.
 
 			Does not have to work for HSP profile in gateway role.
 			Also does not have to work for HFP profile in gateway
 			role when "codec-negotiation" feature is not supported.
+
+			On success this method returns newly registered audio
+			transport path, then DBus service id and object path of
+			application's agent which took audio transport socket.
 
 			Possible errors: org.hsphfpd.Error.InvalidArguments
 					 org.hsphfpd.Error.NotConnected
@@ -350,6 +357,9 @@ Properties
 
 			List of features supported by Endpoint.
 
+			HS features:
+			"volume-control"
+
 			HF features:
 			"echo-canceling-and-noise-reduction"
 			"three-way-calling"
@@ -361,6 +371,8 @@ Properties
 			"codec-negotiation"
 			"hf-indicators"
 			"esco-s4-settings"
+
+			"wide-band-speech"
 
 			AG features:
 			"three-way-calling"
@@ -376,6 +388,8 @@ Properties
 			"hf-indicators"
 			"esco-s4-settings"
 
+			"wide-band-speech"
+
 			AG call hold features:
 			"release-all-held"
 			"release-specified-active-call"
@@ -386,7 +400,7 @@ Properties
 
 			HF indicator features:
 			"enhanced-safety"
-			"battery-level" (hf) / "report-battery-level" (ag)
+			"battery-level"
 
 			AG indicator features:
 			"service-availability"
@@ -395,10 +409,10 @@ Properties
 			"call-held"
 			"signal-strength"
 			"roam-status"
-			"report-battery-level" (hf) / "battery-level" (ag)
+			"battery-level"
 
 			CSR features:
-			"caller-name"
+			"csr-caller-name"
 			"csr-display-text"
 			"csr-sms-indication"
 			"csr-battery-level"
@@ -508,27 +522,64 @@ Methods
 			socket is closed and audio transport is destroyed.
 
 Properties
-		uint16 MicrophoneGain [readwrite]
+		string VolumeControl [readonly]
 
-			Microphone gain value reported by remote device. Audio
-			application agent should respect it. Property is changed
-			when remote device ask request changing it. Property is
-			possible to change also by audio application agent. Then
-			change event is send to remote device.
+			Type of microphone and speaker gain of remote device.
+
+			Possible values:
+			"remote" - Remote device tune microphone and speaker
+				   gain of transmitted audio according to
+				   MicrophoneGain and SpeakerGain properties.
+				   Audio agent should not change gain of
+				   transmitted audio. But it may change
+				   MicrophoneGain and SpeakerGain properties.
+			"local"  - Remote device is not capable of changing
+				   microphone and speaker gain of received
+				   audio, but can inform audio agent to tune
+				   microphone and speaker gain before doing
+				   audio transmission. Also can receive hints
+				   from audio agent what are current values of
+				   configured gains. Audio agent should install
+				   softvol plugin and tune microphone and
+				   speaker gain according to MicrophoneGain and
+				   SpeakerGain properties. When volume in
+				   solftvol plugin is changed then audio agent
+				   should update MicrophoneGain and SpeakerGain
+				   properties.
+			"none"   - Remote device has no support for any kind
+				   of volume control. Audio agent needs to use
+				   softvol plugin if it want to change volume.
+				   MicrophoneGain and SpeakerGain properties
+				   are not present.
+
+			Cached value. May change also when connection is already
+			established.
+
+		uint16 MicrophoneGain [readwrite, optional]
+
+			Microphone gain value. Property is present only when
+			VolumeControl is not "none". See VolumeControl.
+
+			Property can be changed either by remote device or
+			local applications.
 
 			Possible values:
 			0-15
 
-		uint16 SpeakerGain [readwrite]
+		uint16 SpeakerGain [readwrite, optional]
 
-			Speaker gain value reported by remote device. Audio
-			application agent should respect it. Property is changed
-			when remote device ask request changing it. Property is
-			possible to change also by audio application agent. Then
-			change event is send to remote device.
+			Speaker gain value. Property is present only when
+			VolumeControl is not "none". See VolumeControl.
+
+			Property can be changed either by remote device or
+			local applications.
 
 			Possible values:
 			0-15
+
+		uint16 MTU [readonly, const]
+
+			MTU of SCO socket.
 
 		string AgentCodec [readonly, const]
 
@@ -613,6 +664,7 @@ Methods
 		void NewConnection(object audio_transport, fd sco, dict properties)
 
 			properties:
+				string VolumeControl
 				uint16 MicrophoneGain
 				uint16 SpeakerGain
 				uint16 MTU
