@@ -140,14 +140,14 @@ $SIG{PIPE} = 'IGNORE';
 
 my %hf_features_mask;
 {
-	my @hf_features_defines = qw(echo-canceling-and-noise-reduction three-way-calling cli-presentation voice-recognition volume-control enhanced-call-status enhanced-call-control codec-negotiation hf-indicators esco-s4-settings);
+	my @hf_features_defines = qw(echo-canceling-and-noise-reduction three-way-calling cli-presentation voice-recognition volume-control enhanced-call-status enhanced-call-control codec-negotiation hf-indicators esco-s4-settings enhanced-voice-recognition-status voice-recognition-text);
 	my $tmp = 0b1;
 	%hf_features_mask = map { (($tmp <<= 1) >> 1) => $_ } @hf_features_defines;
 }
 
 my %hf_profile_features_mask;
 {
-	my @hf_profile_features_defines = qw(echo-canceling-and-noise-reduction three-way-calling cli-presentation voice-recognition volume-control wide-band-speech);
+	my @hf_profile_features_defines = qw(echo-canceling-and-noise-reduction three-way-calling cli-presentation voice-recognition volume-control wide-band-speech enhanced-voice-recognition-status voice-recognition-text);
 	my $tmp = 0b1;
 	%hf_profile_features_mask = map { (($tmp <<= 1) >> 1) => $_ } @hf_profile_features_defines;
 }
@@ -171,9 +171,13 @@ my $ag_indicator_call_setup;
 {
 	# Seems that Creative Labs headsets require at least "service" and "call" indicators, otherwise they drop HFP connection
 	my @ag_indicators_defines = (
-		# Indicators defined in HF profile, version 1.7
-		service => '0,1', call => '0,1', callsetup => '0-3', callheld => '0-2', signal => '0-5', roam => '0,1', battchg => '0-5',
-		# Additional indicators defined in HF profile, version 1.0
+		# Indicators introduced in HF profile, version 0.6
+		service => '0,1', call => '0,1',
+		# Indicators introduced in HF profile, version 1.0
+		callsetup => '0-3',
+		# Indicators introduced in HF profile, version 1.5
+		callheld => '0-2', signal => '0-5', roam => '0,1', battchg => '0-5',
+		# Additional indicators defined in HF profile, version 1.00 Voting Draft
 		call_setup => '0-3',
 		# Additional indicators defined in ETS 300 916 - Edition 08
 		sounder => '0,1', message => '0,1', vox => '0,1', smsfull => '0,1',
@@ -214,7 +218,7 @@ my $fd_num = 0;
 my %profiles; # profile => exists
 my %adapters; # adapter => {address, devices => {device => exists}, codecs => {air_codec => agent_codec => exists}}
 my %devices; # device => {adapter, selected_profile, profiles => {profile => endpoint}}
-my %endpoints; # endpoint => {device, audio, profile, object, properties, hs_volume_control, hfp_wide_band_speech, ag_features, ag_indicators, ag_indicators_reporting, ag_call_waiting_notifications, hf_features, csr_features, apple_features, hf_codecs, csr_codecs, selected_codec, socket, microphone_gain, speaker_gain}
+my %endpoints; # endpoint => {device, audio, profile, object, properties, hs_volume_control, hfp_wide_band_speech, ag_features, ag_indicators, ag_indicators_reporting, ag_call_waiting_notifications, hf_features, csr_features, apple_features, hf_codecs, csr_codecs, selected_codec, socket, rx_volume_control, tx_volume_control, rx_volume_gain, tx_volume_gain}
 my %audios; # audio => {endpoint, socket, object, mtu, air_codec, agent_codec, agent_path, application_service, application_path}
 my @applications; # [application]
 
@@ -933,10 +937,13 @@ sub hsphfpd_establish_audio {
 	print "Audio transport $audio created\n";
 
 	my $properties = {
-		VolumeControl => dbus_string($endpoints{$endpoint}->{volume_control}),
-		($endpoints{$endpoint}->{volume_control} ne 'none') ? (
-			MicrophoneGain => dbus_uint16($endpoints{$endpoint}->{microphone_gain}),
-			SpeakerGain => dbus_uint16($endpoints{$endpoint}->{speaker_gain}),
+		RxVolumeControl => dbus_string($endpoints{$endpoint}->{rx_volume_control}),
+		($endpoints{$endpoint}->{rx_volume_control} ne 'none') ? (
+			RxVolumeGain => dbus_uint16($endpoints{$endpoint}->{rx_volume_gain}),
+		) : (),
+		TxVolumeControl => dbus_string($endpoints{$endpoint}->{tx_volume_control}),
+		($endpoints{$endpoint}->{tx_volume_control} ne 'none') ? (
+			TxVolumeGain => dbus_uint16($endpoints{$endpoint}->{tx_volume_gain}),
 		) : (),
 		MTU => dbus_uint16($mtu),
 		Endpoint => dbus_object_path($endpoint),
@@ -1014,54 +1021,56 @@ sub hsphfpd_disconnect_audio {
 	delete $audios{$audio};
 }
 
-sub hsphfpd_microphone_gain {
+sub hsphfpd_rx_volume_gain {
 	my ($audio, $new_gain) = @_;
 	throw_dbus_error('org.hsphfpd.Error.InvalidArguments', qq(Audio transport "$audio" does not exist)) unless exists $audios{$audio};
 	my $endpoint = $audios{$audio}->{endpoint};
-	throw_dbus_error('org.hsphfpd.Error.InvalidArguments', qq(Volume control for audio transport "$audio" is not supported)) if $endpoints{$endpoint}->{volume_control} eq 'none';
-	return $endpoints{$endpoint}->{microphone_gain} unless defined $new_gain;
+	throw_dbus_error('org.hsphfpd.Error.InvalidArguments', qq(Rx volume control for audio transport "$audio" is not supported)) if $endpoints{$endpoint}->{rx_volume_control} eq 'none';
+	return $endpoints{$endpoint}->{rx_volume_gain} unless defined $new_gain;
 	throw_dbus_error('org.hsphfpd.Error.InvalidArguments', qq(Invalid value "$new_gain", it must be in range 0-15)) unless $new_gain =~ /^(?:[0-9]|1[0-5])$/;
-	return if $endpoints{$endpoint}->{microphone_gain} == $new_gain;
-	print "Setting microphone gain to $new_gain for endpoint $endpoint\n";
+	return if $endpoints{$endpoint}->{rx_volume_gain} == $new_gain;
+	print "Setting rx volume gain to $new_gain for endpoint $endpoint\n";
 	my $profile = $endpoints{$endpoint}->{profile};
 	if ($profile eq 'hsp_hs') {
 		hsphfpd_socket_write($endpoint, "+VGM=$new_gain") or throw_dbus_error('org.hsphfpd.Error.Failed', 'Failed');
 	} elsif ($profile eq 'hfp_hf') {
 		hsphfpd_socket_write($endpoint, "+VGM: $new_gain") or throw_dbus_error('org.hsphfpd.Error.Failed', 'Failed');
 	} else {
-		hsphfpd_socket_write($endpoint, "AT+VGM=$new_gain") or throw_dbus_error('org.hsphfpd.Error.Failed', 'Failed');
+		# AG role describes speaker as local receiving device
+		hsphfpd_socket_write($endpoint, "AT+VGS=$new_gain") or throw_dbus_error('org.hsphfpd.Error.Failed', 'Failed');
 		if (not hsphfpd_socket_wait_for_ok_error($endpoint)) {
-			hsphfpd_volume_control_changed($endpoint, 'none');
+			hsphfpd_rx_volume_control_changed($endpoint, 'none');
 			throw_dbus_error('org.hsphfpd.Error.Failed', 'Failed');
 		}
 	}
-	$endpoints{$endpoint}->{microphone_gain} = $new_gain;
-	$audios{$audio}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.AudioTransport', { MicrophoneGain => dbus_uint16($new_gain) }, []);
+	$endpoints{$endpoint}->{rx_volume_gain} = $new_gain;
+	$audios{$audio}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.AudioTransport', { RxVolumeGain => dbus_uint16($new_gain) }, []);
 }
 
-sub hsphfpd_speaker_gain {
+sub hsphfpd_tx_volume_gain {
 	my ($audio, $new_gain) = @_;
 	throw_dbus_error('org.hsphfpd.Error.InvalidArguments', qq(Audio transport "$audio" does not exist)) unless exists $audios{$audio};
 	my $endpoint = $audios{$audio}->{endpoint};
-	throw_dbus_error('org.hsphfpd.Error.InvalidArguments', qq(Volume control for audio transport "$audio" is not supported)) if $endpoints{$endpoint}->{volume_control} eq 'none';
-	return $endpoints{$endpoint}->{speaker_gain} unless defined $new_gain;
+	throw_dbus_error('org.hsphfpd.Error.InvalidArguments', qq(Tx volume control for audio transport "$audio" is not supported)) if $endpoints{$endpoint}->{tx_volume_control} eq 'none';
+	return $endpoints{$endpoint}->{tx_volume_gain} unless defined $new_gain;
 	throw_dbus_error('org.hsphfpd.Error.InvalidArguments', qq(Invalid value "$new_gain", it must be in range 0-15)) unless $new_gain =~ /^(?:[0-9]|1[0-5])$/;
-	return if $endpoints{$endpoint}->{speaker_gain} == $new_gain;
-	print "Setting speaker gain to $new_gain for endpoint $endpoint\n";
+	return if $endpoints{$endpoint}->{tx_volume_gain} == $new_gain;
+	print "Setting tx volume gain to $new_gain for endpoint $endpoint\n";
 	my $profile = $endpoints{$endpoint}->{profile};
 	if ($profile eq 'hsp_hs') {
 		hsphfpd_socket_write($endpoint, "+VGS=$new_gain") or throw_dbus_error('org.hsphfpd.Error.Failed', 'Failed');
 	} elsif ($profile eq 'hfp_hf') {
 		hsphfpd_socket_write($endpoint, "+VGS: $new_gain") or throw_dbus_error('org.hsphfpd.Error.Failed', 'Failed');
 	} else {
-		hsphfpd_socket_write($endpoint, "AT+VGS=$new_gain") or throw_dbus_error('org.hsphfpd.Error.Failed', 'Failed');
+		# AG role describes microphone as local transmitting device
+		hsphfpd_socket_write($endpoint, "AT+VGM=$new_gain") or throw_dbus_error('org.hsphfpd.Error.Failed', 'Failed');
 		if (not hsphfpd_socket_wait_for_ok_error($endpoint)) {
-			hsphfpd_volume_control_changed($endpoint, 'none');
+			hsphfpd_tx_volume_control_changed($endpoint, 'none');
 			throw_dbus_error('org.hsphfpd.Error.Failed', 'Failed');
 		}
 	}
-	$endpoints{$endpoint}->{speaker_gain} = $new_gain;
-	$audios{$audio}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.AudioTransport', { SpeakerGain => dbus_uint16($new_gain) }, []);
+	$endpoints{$endpoint}->{tx_volume_gain} = $new_gain;
+	$audios{$audio}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.AudioTransport', { TxVolumeGain => dbus_uint16($new_gain) }, []);
 }
 
 sub hsphfpd_send_ring_event {
@@ -1133,41 +1142,56 @@ sub hsphfpd_socket_wait_for_ok_error {
 	return;
 }
 
-sub hsphfpd_volume_control_changed {
+sub hsphfpd_rx_volume_control_changed {
 	my ($endpoint, $new_volume_control) = @_;
 	if (exists $endpoints{$endpoint}->{audio}) {
 		my $access = ($new_volume_control eq 'none') ? 'write' : 'readwrite'; # write access will hide property in GetAll() method
-		$audios{$endpoints{$endpoint}->{audio}}->{object}->{introspector}->{interfaces}->{'org.hsphfpd.AudioTransport'}->{props}->{MicrophoneGain}->{access} = $access;
-		$audios{$endpoints{$endpoint}->{audio}}->{object}->{introspector}->{interfaces}->{'org.hsphfpd.AudioTransport'}->{props}->{SpeakerGain}->{access} = $access;
-		if ($endpoints{$endpoint}->{volume_control} ne $new_volume_control) {
+		$audios{$endpoints{$endpoint}->{audio}}->{object}->{introspector}->{interfaces}->{'org.hsphfpd.AudioTransport'}->{props}->{RxVolumeGain}->{access} = $access;
+		if ($endpoints{$endpoint}->{rx_volume_control} ne $new_volume_control) {
 			if ($new_volume_control eq 'none') {
-				$audios{$endpoints{$endpoint}->{audio}}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.AudioTransport', { VolumeControl => dbus_string($new_volume_control) }, [ dbus_string('MicrophoneGain'), dbus_string('SpeakerGain') ]);
+				$audios{$endpoints{$endpoint}->{audio}}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.AudioTransport', { RxVolumeControl => dbus_string($new_volume_control) }, [ dbus_string('RxVolumeGain') ]);
 			} else {
-				$audios{$endpoints{$endpoint}->{audio}}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.AudioTransport', { VolumeControl => dbus_string($new_volume_control), MicrophoneGain => dbus_uint16($endpoints{$endpoint}->{microphone_gain}) , SpeakerGain => dbus_uint16($endpoints{$endpoint}->{speaker_gain}) }, []);
+				$audios{$endpoints{$endpoint}->{audio}}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.AudioTransport', { RxVolumeControl => dbus_string($new_volume_control), RxVolumeGain => dbus_uint16($endpoints{$endpoint}->{rx_volume_gain}) }, []);
 			}
 		}
 	}
-	$endpoints{$endpoint}->{volume_control} = $new_volume_control;
+	$endpoints{$endpoint}->{rx_volume_control} = $new_volume_control;
 }
 
-sub hsphfpd_speaker_gain_changed {
+sub hsphfpd_tx_volume_control_changed {
+	my ($endpoint, $new_volume_control) = @_;
+	if (exists $endpoints{$endpoint}->{audio}) {
+		my $access = ($new_volume_control eq 'none') ? 'write' : 'readwrite'; # write access will hide property in GetAll() method
+		$audios{$endpoints{$endpoint}->{audio}}->{object}->{introspector}->{interfaces}->{'org.hsphfpd.AudioTransport'}->{props}->{TxVolumeGain}->{access} = $access;
+		if ($endpoints{$endpoint}->{tx_volume_control} ne $new_volume_control) {
+			if ($new_volume_control eq 'none') {
+				$audios{$endpoints{$endpoint}->{audio}}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.AudioTransport', { TxVolumeControl => dbus_string($new_volume_control) }, [ dbus_string('TxVolumeGain') ]);
+			} else {
+				$audios{$endpoints{$endpoint}->{audio}}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.AudioTransport', { TxVolumeControl => dbus_string($new_volume_control), TxVolumeGain => dbus_uint16($endpoints{$endpoint}->{tx_volume_gain}) }, []);
+			}
+		}
+	}
+	$endpoints{$endpoint}->{tx_volume_control} = $new_volume_control;
+}
+
+sub hsphfpd_tx_volume_gain_changed {
 	my ($endpoint, $new_gain) = @_;
 	$new_gain = 0 if $new_gain < 0;
 	$new_gain = 15 if $new_gain > 15;
-	return if $endpoints{$endpoint}->{speaker_gain} == $new_gain;
-	print "Setting speaker gain to $new_gain\n";
-	$endpoints{$endpoint}->{speaker_gain} = $new_gain;
-	$audios{$endpoints{$endpoint}->{audio}}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.AudioTransport', { SpeakerGain => dbus_uint16($new_gain) }, []) if exists $endpoints{$endpoint}->{audio};
+	return if $endpoints{$endpoint}->{tx_volume_gain} == $new_gain;
+	print "Setting tx volume gain to $new_gain\n";
+	$endpoints{$endpoint}->{tx_volume_gain} = $new_gain;
+	$audios{$endpoints{$endpoint}->{audio}}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.AudioTransport', { TxVolumeGain => dbus_uint16($new_gain) }, []) if exists $endpoints{$endpoint}->{audio};
 }
 
-sub hsphfpd_microphone_gain_changed {
+sub hsphfpd_rx_volume_gain_changed {
 	my ($endpoint, $new_gain) = @_;
 	$new_gain = 0 if $new_gain < 0;
 	$new_gain = 15 if $new_gain > 15;
-	return if $endpoints{$endpoint}->{microphone_gain} == $new_gain;
-	print "Setting microphone gain to $new_gain\n";
-	$endpoints{$endpoint}->{microphone_gain} = $new_gain;
-	$audios{$endpoints{$endpoint}->{audio}}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.AudioTransport', { MicrophoneGain => dbus_uint16($new_gain) }, []) if exists $endpoints{$endpoint}->{audio};
+	return if $endpoints{$endpoint}->{rx_volume_gain} == $new_gain;
+	print "Setting rx volume gain to $new_gain\n";
+	$endpoints{$endpoint}->{rx_volume_gain} = $new_gain;
+	$audios{$endpoints{$endpoint}->{audio}}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.AudioTransport', { RxVolumeGain => dbus_uint16($new_gain) }, []) if exists $endpoints{$endpoint}->{audio};
 }
 
 sub hsphfpd_button_pressed {
@@ -1444,13 +1468,13 @@ sub hsphfpd_socket_ready_read {
 			# Some HSP devices really send +VGS= and +VGM= commands without AT prefix
 			if ($line =~ /^(?:AT)?\+VGS=([0-9]+)$/) {
 				my $new_gain = $1;
-				hsphfpd_volume_control_changed($endpoint, 'remote');
-				hsphfpd_speaker_gain_changed($endpoint, $new_gain);
+				hsphfpd_tx_volume_control_changed($endpoint, 'remote');
+				hsphfpd_tx_volume_gain_changed($endpoint, $new_gain);
 				hsphfpd_socket_write($endpoint, 'OK') or return;
 			} elsif ($line =~ /^(?:AT)?\+VGM=([0-9]+)$/) {
 				my $new_gain = $1;
-				hsphfpd_volume_control_changed($endpoint, 'remote');
-				hsphfpd_microphone_gain_changed($endpoint, $new_gain);
+				hsphfpd_rx_volume_control_changed($endpoint, 'remote');
+				hsphfpd_rx_volume_gain_changed($endpoint, $new_gain);
 				hsphfpd_socket_write($endpoint, 'OK') or return;
 			} elsif ($line eq 'AT+CKPD=200') {
 				hsphfpd_button_pressed($endpoint);
@@ -1524,9 +1548,11 @@ sub hsphfpd_socket_ready_read {
 			}
 		} elsif ($profile eq 'hsp_ag') {
 			if ($line =~ /^\+VGS=([0-9]+)$/) {
-				hsphfpd_speaker_gain_changed($endpoint, $1);
+				# AG role describes speaker as local receiving device
+				hsphfpd_rx_volume_gain_changed($endpoint, $1);
 			} elsif ($line =~ /^\+VGM=([0-9]+)$/) {
-				hsphfpd_microphone_gain_changed($endpoint, $1);
+				# AG role describes microphone as local transmitting device
+				hsphfpd_tx_volume_gain_changed($endpoint, $1);
 			} elsif ($line eq 'RING') {
 				print "Incoming call event\n";
 				$endpoints{$endpoint}->{object}->emit_signal('IncomingCall', 'org.hsphfpd.GatewayEndpoint');
@@ -1586,9 +1612,10 @@ sub hsphfpd_socket_ready_read {
 				print "Supported HF features:\n" . (join "\n", sort keys %hf_features) . "\n";
 				$endpoints{$endpoint}->{hf_features} = \%hf_features;
 				hsphfpd_update_features($endpoint);
-				hsphfpd_volume_control_changed($endpoint, (exists $hf_features{'volume-control'} ? 'remote' : 'none'));
+				hsphfpd_rx_volume_control_changed($endpoint, (exists $hf_features{'volume-control'} ? 'remote' : 'none'));
+				hsphfpd_tx_volume_control_changed($endpoint, (exists $hf_features{'volume-control'} ? 'remote' : 'none'));
 				# We report all defined AG features are supported
-				hsphfpd_socket_write($endpoint, "+BRSF: " . int(0b111111111111)) or return;
+				hsphfpd_socket_write($endpoint, "+BRSF: " . int(0b11111111111111)) or return;
 				hsphfpd_socket_write($endpoint, 'OK') or return;
 			} elsif ($line =~ /^AT\+BAC=([0-9]+(?:,\s*(?1))?)$/) {
 				my @hf_codec_ids = map int, split /,\s*/, $1;
@@ -1713,13 +1740,13 @@ sub hsphfpd_socket_ready_read {
 				}
 			} elsif ($line =~ /^AT\+VGS=([0-9]+)$/) {
 				my $new_gain = $1;
-				hsphfpd_volume_control_changed($endpoint, 'remote');
-				hsphfpd_speaker_gain_changed($endpoint, $new_gain);
+				hsphfpd_tx_volume_control_changed($endpoint, 'remote');
+				hsphfpd_tx_volume_gain_changed($endpoint, $new_gain);
 				hsphfpd_socket_write($endpoint, 'OK') or return;
 			} elsif ($line =~ /^AT\+VGM=([0-9]+)$/) {
 				my $new_gain = $1;
-				hsphfpd_volume_control_changed($endpoint, 'remote');
-				hsphfpd_microphone_gain_changed($endpoint, $new_gain);
+				hsphfpd_rx_volume_control_changed($endpoint, 'remote');
+				hsphfpd_rx_volume_gain_changed($endpoint, $new_gain);
 				hsphfpd_socket_write($endpoint, 'OK') or return;
 			} elsif ($line =~ /^AT\+CSRSF=([0-9]+),\s*([0-9]+),\s*([0-9]+),\s*([0-9]+),\s*([0-9]+)(?:,\s*([0-9]+)(?:,\s*([0-9]+))?)?/) {
 				my $response = hsphfpd_csr_supported_features($endpoint, $1, $2, $3, $4, $5, $6, $7);
@@ -1827,7 +1854,7 @@ sub hsphfpd_socket_ready_read {
 					print "Telephony agent is not connected\n";
 					hsphfpd_socket_write($endpoint, 'ERROR') or return;
 				}
-			} elsif ($line =~ /^AT\+BVRA=([0-1])$/) {
+			} elsif ($line =~ /^AT\+BVRA=([0-2])$/) {
 				print "Request for enabling/disabling of voice recognition function\n";
 				hsphfpd_button_pressed($endpoint);
 				if (exists $endpoints{$endpoint}->{telephony}) {
@@ -1971,7 +1998,9 @@ sub hsphfpd_connect_endpoint {
 		print "Supported HF profile features:\n" . (join "\n", sort keys %hf_features) . "\n";
 		$endpoints{$endpoint}->{hf_features} = \%hf_features;
 		hsphfpd_update_features($endpoint);
-		hsphfpd_volume_control_changed($endpoint, 'remote') if exists $endpoints{$endpoint}->{hf_features}->{'volume-control'};
+		# When volume-control feature is present, expects that it represents both RX and TX
+		hsphfpd_rx_volume_control_changed($endpoint, 'remote') if exists $endpoints{$endpoint}->{hf_features}->{'volume-control'};
+		hsphfpd_tx_volume_control_changed($endpoint, 'remote') if exists $endpoints{$endpoint}->{hf_features}->{'volume-control'};
 	} elsif ($profile eq 'hfp_ag') {
 		my %ag_features;
 		foreach (sort { $a <=> $b } keys %ag_profile_features_mask) { $ag_features{$ag_profile_features_mask{$_}} = 1 if $endpoints{$endpoint}->{profile_features} & int($_); }
@@ -1984,17 +2013,21 @@ sub hsphfpd_connect_endpoint {
 		$endpoints{$endpoint}->{hs_volume_control} = $endpoints{$endpoint}->{profile_features} & int(0b1);
 		print "Supported HS profile features:\n" . ($endpoints{$endpoint}->{hs_volume_control} ? 'volume-control' : '') . "\n";
 		hsphfpd_update_features($endpoint);
-		hsphfpd_volume_control_changed($endpoint, 'remote') if $endpoints{$endpoint}->{hs_volume_control};
+		# When volume-control feature is present, expects that it represents both RX and TX
+		hsphfpd_rx_volume_control_changed($endpoint, 'remote') if $endpoints{$endpoint}->{hs_volume_control};
+		hsphfpd_tx_volume_control_changed($endpoint, 'remote') if $endpoints{$endpoint}->{hs_volume_control};
 	}
 
 	if ($profile eq 'hsp_ag') {
-		hsphfpd_socket_write($endpoint, "AT+VGS=" . $endpoints{$endpoint}->{speaker_gain}) or throw_dbus_error('org.bluez.Error.Canceled', 'Canceled');
+		# AG role describes speaker as local receiving device
+		hsphfpd_socket_write($endpoint, "AT+VGS=" . $endpoints{$endpoint}->{rx_volume_gain}) or throw_dbus_error('org.bluez.Error.Canceled', 'Canceled');
 		if (not hsphfpd_socket_wait_for_ok_error($endpoint)) {
-			hsphfpd_volume_control_changed($endpoint, 'none');
+			hsphfpd_rx_volume_control_changed($endpoint, 'none');
 		}
-		hsphfpd_socket_write($endpoint, "AT+VGM=" . $endpoints{$endpoint}->{microphone_gain}) or throw_dbus_error('org.bluez.Error.Canceled', 'Canceled');
+		# AG role describes microphone as local transmitting device
+		hsphfpd_socket_write($endpoint, "AT+VGM=" . $endpoints{$endpoint}->{tx_volume_gain}) or throw_dbus_error('org.bluez.Error.Canceled', 'Canceled');
 		if (not hsphfpd_socket_wait_for_ok_error($endpoint)) {
-			hsphfpd_volume_control_changed($endpoint, 'none');
+			hsphfpd_tx_volume_control_changed($endpoint, 'none');
 		}
 		# TODO: send AT+XAPL=
 		# In HSP mode we do not support telephony functions, so caller_name and sms_ind is not announced
@@ -2209,10 +2242,10 @@ sub bluez_register_profiles {
 </record>
 EOD
 
-	bluez_register_profile('hfp_hf', '0000111f-0000-1000-8000-00805f9b34fb', { Version => dbus_uint16(0x0107), Features => dbus_uint16(0b111111) }); # bluez prior to version 5.50 sets version in SDP record for HFP_AG to 1.5
+	bluez_register_profile('hfp_hf', '0000111f-0000-1000-8000-00805f9b34fb', { Version => dbus_uint16(0x0108), Features => dbus_uint16(0b11111111) }); # bluez prior to version 5.50 sets version in SDP record for HFP_AG to 1.5
 	bluez_register_profile('hsp_hs', '00001112-0000-1000-8000-00805f9b34fb', { Version => dbus_uint16(0x0102) }); # bluez prior to version 5.26 does not set version in SDP record for HSP_AG profile
 	# TODO: implement HFP AG role
-	#bluez_register_profile('hfp_ag', '0000111e-0000-1000-8000-00805f9b34fb', { Version => dbus_uint16(0x0107), Features => dbus_uint16(0b111111) }); # bluez prior to version 5.50 sets version in SDP record for HFP_HF to 1.5
+	#bluez_register_profile('hfp_ag', '0000111e-0000-1000-8000-00805f9b34fb', { Version => dbus_uint16(0x0108), Features => dbus_uint16(0b11111111) }); # bluez prior to version 5.50 sets version in SDP record for HFP_HF to 1.5
 	bluez_register_profile('hsp_ag', '00001108-0000-1000-8000-00805f9b34fb', { Name => dbus_string($hsp_ag_name), Version => dbus_uint16(hex($hsp_ag_version)), Features => dbus_uint16(0b1), AutoConnect => dbus_boolean(1), Channel => dbus_uint16(hex($hsp_ag_channel)), ServiceRecord => dbus_string($hsp_ag_record) }); # bluez prior to version 5.55 does not have SDP record for HSP_HS profile
 }
 
@@ -2297,7 +2330,7 @@ sub bluez_interfaces_added {
 		last unless ref $uuids eq 'ARRAY';
 		foreach (@{$uuids}) {
 			my ($profile, $profile_name, $role_name, $class);
-			my $volume_control = 'none';
+			my $init_volume_control = 'none';
 			my $ag_indicators;
 			if ($_ eq '00001108-0000-1000-8000-00805f9b34fb' or $_ eq '00001131-0000-1000-8000-00805f9b34fb') {
 				$profile = 'hsp_hs';
@@ -2309,7 +2342,7 @@ sub bluez_interfaces_added {
 				$profile_name = 'headset';
 				$role_name = 'gateway';
 				$class = 'main::HSPGatewayEndpoint';
-				$volume_control = 'local';
+				$init_volume_control = 'local';
 			} elsif ($_ eq '0000111e-0000-1000-8000-00805f9b34fb') {
 				$profile = 'hfp_hf';
 				$profile_name = 'handsfree';
@@ -2321,7 +2354,7 @@ sub bluez_interfaces_added {
 				$profile_name = 'handsfree';
 				$role_name = 'gateway';
 				$class = 'main::HFPGatewayEndpoint';
-				$volume_control = 'local';
+				$init_volume_control = 'local';
 			} else {
 				next;
 			}
@@ -2335,7 +2368,7 @@ sub bluez_interfaces_added {
 			$devices{$device}->{adapter} = $adapter;
 			$devices{$device}->{profiles}->{$profile} = $endpoint;
 			# TODO: load codecs, gains, profile, version, last codec and features from local cache
-			$endpoints{$endpoint} = { device => $device, modalias => $modalias, profile => $profile, ag_indicators => $ag_indicators // {}, volume_control => $volume_control, ag_indicators_reporting => 0, hf_features => {}, ag_features => {}, csr_features => {}, apple_features => {}, hf_indicators => {}, hf_codecs => [], csr_codecs => [], microphone_gain => 8, speaker_gain => 8, selected_codec => 'CVSD', codecs => { CVSD => 1 } };
+			$endpoints{$endpoint} = { device => $device, modalias => $modalias, profile => $profile, ag_indicators => $ag_indicators // {}, rx_volume_control => $init_volume_control, tx_volume_control => $init_volume_control, ag_indicators_reporting => 0, hf_features => {}, ag_features => {}, csr_features => {}, apple_features => {}, hf_indicators => {}, hf_codecs => [], csr_codecs => [], rx_volume_gain => 8, tx_volume_gain => 8, selected_codec => 'CVSD', codecs => { CVSD => 1 } };
 			$endpoints{$endpoint}->{properties} = { Name => dbus_string($name), LocalAddress => dbus_string($adapter_address), RemoteAddress => dbus_string($address), Connected => dbus_boolean(0), AudioConnected => dbus_boolean(0), TelephonyConnected => dbus_boolean(0), Profile => dbus_string($profile_name), Version => dbus_string(''), Role => dbus_string($role_name), PowerSource => dbus_string('unknown'), BatteryLevel => dbus_int16(-1), Features => dbus_array([]), AudioCodecs => dbus_array([ dbus_string('CVSD') ]) };
 			$endpoints{$endpoint}->{object} = $class->new($hsphfpd_manager, $endpoint_suffix);
 			$hsphfpd_manager->emit_signal('InterfacesAdded', $endpoint, { 'org.hsphfpd.Endpoint' => $endpoints{$endpoint}->{properties} });
@@ -2473,9 +2506,10 @@ sub main::HSPGatewayEndpoint::SendButtonPressEvent { hsphfpd_send_button_event(s
 	use Net::DBus::Exporter 'org.hsphfpd.AudioTransport';
 	BEGIN {
 		dbus_method('Release', [], [], { strict_exceptions => 1 });
-		dbus_property('VolumeControl', 'string', 'read', { strict_exceptions => 1 });
-		dbus_property('MicrophoneGain', 'uint16', 'readwrite', { strict_exceptions => 1 });
-		dbus_property('SpeakerGain', 'uint16', 'readwrite', { strict_exceptions => 1 });
+		dbus_property('RxVolumeControl', 'string', 'read', { strict_exceptions => 1 });
+		dbus_property('TxVolumeControl', 'string', 'read', { strict_exceptions => 1 });
+		dbus_property('RxVolumeGain', 'uint16', 'readwrite', { strict_exceptions => 1 });
+		dbus_property('TxVolumeGain', 'uint16', 'readwrite', { strict_exceptions => 1 });
 		dbus_property('MTU', 'uint16', 'read', { strict_exceptions => 1 });
 		dbus_property('AirCodec', 'string', 'read', { strict_exceptions => 1 });
 		dbus_property('AgentCodec', 'string', 'read', { strict_exceptions => 1 });
@@ -2484,9 +2518,10 @@ sub main::HSPGatewayEndpoint::SendButtonPressEvent { hsphfpd_send_button_event(s
 	}
 }
 sub main::Audio::Release { hsphfpd_disconnect_audio(shift->get_object_path()) }
-sub main::Audio::VolumeControl { $endpoints{$audios{shift->get_object_path()}->{endpoint}}->{volume_control} }
-sub main::Audio::MicrophoneGain { hsphfpd_microphone_gain(shift->get_object_path(), @_) }
-sub main::Audio::SpeakerGain { hsphfpd_speaker_gain(shift->get_object_path(), @_) }
+sub main::Audio::RxVolumeControl { $endpoints{$audios{shift->get_object_path()}->{endpoint}}->{rx_volume_control} }
+sub main::Audio::TxVolumeControl { $endpoints{$audios{shift->get_object_path()}->{endpoint}}->{tx_volume_control} }
+sub main::Audio::RxVolumeGain { hsphfpd_rx_volume_gain(shift->get_object_path(), @_) }
+sub main::Audio::TxVolumeGain { hsphfpd_tx_volume_gain(shift->get_object_path(), @_) }
 sub main::Audio::MTU { $audios{shift->get_object_path()}->{mtu} }
 sub main::Audio::AirCodec { $audios{shift->get_object_path()}->{air_codec} }
 sub main::Audio::AgentCodec { $audios{shift->get_object_path()}->{agent_codec} }

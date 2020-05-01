@@ -522,56 +522,100 @@ Methods
 			socket is closed and audio transport is destroyed.
 
 Properties
-		string VolumeControl [readonly]
+		string RxVolumeControl [readonly]
 
-			Type of microphone and speaker gain of remote device.
+			This property describes who tunes gain of stream which
+			is receiving by audio agent.
 
 			Possible values:
-			"remote" - Remote device tune microphone and speaker
-				   gain of transmitted audio according to
-				   MicrophoneGain and SpeakerGain properties.
-				   Audio agent should not change gain of
-				   transmitted audio. But it may change
-				   MicrophoneGain and SpeakerGain properties.
-			"local"  - Remote device is not capable of changing
-				   microphone and speaker gain of received
-				   audio, but can inform audio agent to tune
-				   microphone and speaker gain before doing
-				   audio transmission. Also can receive hints
-				   from audio agent what are current values of
-				   configured gains. Audio agent should install
-				   softvol plugin and tune microphone and
-				   speaker gain according to MicrophoneGain and
-				   SpeakerGain properties. When volume in
-				   solftvol plugin is changed then audio agent
-				   should update MicrophoneGain and SpeakerGain
-				   properties.
+			"remote" - Remote device tunes gain of transmitted audio
+				   stream according to RxVolumeGain property
+				   (audio stream which agent receives). Audio
+				   agent should not change gain of received
+				   audio stream. But it may change RxVolumeGain
+				   property to tell remote device to tune gain
+				   before transmitting audio stream.
+			"local"  - Remote device is not capable of changing gain
+				   of transmitting audio stream but can inform
+				   audio agent to post-process received audio
+				   stream for specified gain value. Remote
+				   device can also receive information from
+				   audio agent what is the current gain value
+				   used in post-processing. Audio agent for this
+				   post-processing should install softvol plugin
+				   and tune gain of received audio stream
+				   according to RxVolumeGain property. When
+				   volume in solftvol plugin is changed then
+				   audio agent should update RxVolumeGain
+				   property to inform remote side about this
+				   change.
 			"none"   - Remote device has no support for any kind
 				   of volume control. Audio agent needs to use
 				   softvol plugin if it want to change volume.
-				   MicrophoneGain and SpeakerGain properties
-				   are not present.
+				   RxVoluemGain property is ignored, does not
+				   contain any meaningful value and does not
+				   have to be present.
 
 			Cached value. May change also when connection is already
 			established.
 
-		uint16 MicrophoneGain [readwrite, optional]
+		string TxVolumeControl [readonly]
 
-			Microphone gain value. Property is present only when
-			VolumeControl is not "none". See VolumeControl.
+			This property describes who tunes gain of stream which
+			is transmitted by audio agent.
 
-			Property can be changed either by remote device or
+			Possible values:
+			"remote" - Remote device tunes gain of received audio
+				   stream according to TxVolumeGain property
+				   (audio stream which agent transmits). Audio
+				   agent should not change gain of transmitting
+				   audio stream. But it may change TxVolumeGain
+				   property to tell remote device to use some
+				   kind of softvol plugin to post-process
+				   received audio stream and tune gain.
+			"local"  - Remote device is not capable of changing gain
+				   of receiving audio stream but can inform
+				   audio agent to preprocess audio stream before
+				   transmission to specified gain value. Remote
+				   device can also receive information from
+				   audio agent what is the current gain value
+				   used in preprocessing. Audio agent for this
+				   preprocessing should install softvol plugin
+				   and tune gain of transmitting audio stream
+				   according to TxVolumeGain property. When
+				   volume in solftvol plugin is changed then
+				   audio agent should update TxVolumeGain
+				   property to inform remote side about this
+				   change.
+			"none"   - Remote device has no support for any kind
+				   of volume control. Audio agent needs to use
+				   softvol plugin if it want to change volume.
+				   TxVoluemGain property is ignored, does not
+				   contain any meaningful value and does not
+				   have to be present.
+
+			Cached value. May change also when connection is already
+			established.
+
+		uint16 RxVolumeGain [readwrite, optional]
+
+			Gain value of the receiving audio stream. Property does
+			not have to be present when RxVolumeControl is "none".
+			See RxVolumeControl.
+
+			Property can be changed either by remote device or by
 			local applications.
 
 			Possible values:
 			0-15
 
-		uint16 SpeakerGain [readwrite, optional]
+		uint16 TxVolumeGain [readwrite, optional]
 
-			Speaker gain value. Property is present only when
-			VolumeControl is not "none". See VolumeControl.
+			Gain value of the transmitting audio stream. Property
+			does not have to be present when TxVolumeControl is
+			"none". See TxVolumeControl.
 
-			Property can be changed either by remote device or
+			Property can be changed either by remote device or by
 			local applications.
 
 			Possible values:
