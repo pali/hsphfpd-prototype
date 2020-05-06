@@ -86,11 +86,14 @@ Install Perl Net::DBus module via some package manager:
   sudo apt-get install libnet-dbus-perl
   sudo yum install perl-Net-DBus
   sudo zypper in perl-Net-DBus
+  sudo pacman -S perl-net-dbus
   sudo cpan Net::DBus
 
 And then copy DBus policy file into DBus system directory:
 
   sudo cp org.hsphfpd.conf /etc/dbus-1/system.d/
+  # or
+  sudo cp org.hsphfpd.conf /usr/share/dbus-1/system.d/
 
 
 Running prototype
