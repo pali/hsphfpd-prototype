@@ -86,6 +86,7 @@ Install Perl Net::DBus module via some package manager:
   sudo apt-get install libnet-dbus-perl
   sudo yum install perl-Net-DBus
   sudo zypper in perl-Net-DBus
+  sudo pacman -S perl-net-dbus
   sudo cpan Net::DBus
 
 And then copy DBus policy file into DBus system directory:
@@ -99,15 +100,20 @@ Running prototype
 Before trying to use hsphfpd prototye it is needed to stop any software which
 may implement Bluetooth HSP or HFP profiles (e.g. pulseaudio, ofono).
 
-For pulseaudio it is enough to unload bluetooth modules:
+To stop ofono just run:
+
+  sudo service ofono stop
+
+For pulseaudio there are already hsphfpd patches available in merge request:
+
+  https://gitlab.freedesktop.org/pulseaudio/pulseaudio/-/merge_requests/288
+
+If you are not using pulseaudio with above hsphfpd patches it is needed to
+unload pulseaudio bluetooth modules:
 
   pactl unload-module module-bluez5-device
   pactl unload-module module-bluez5-discover
   pactl unload-module module-bluetooth-discover
-
-To stop ofono just run:
-
-  sudo service ofono stop
 
 After that it is possible to start hsphfpd prototype daemon implementation:
 
@@ -132,6 +138,10 @@ Audio connection
 
 For receiving audio from microphone or sending audio to speakers, it is needed
 to implement Audio agent which would connect to hsphfpd via DBus.
+
+If you are using pulseaudio with hsphfpd patches then pulseaudio already
+implements needed Audio agent and therefore you should not need to use
+example of Audio agent as described below.
 
 This prototype implementation contains example of Audio agent audio_client.pl.
 For every remote connection from hsphfpd it sends remote microphone data to
