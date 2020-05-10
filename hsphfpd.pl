@@ -1503,7 +1503,7 @@ sub hsphfpd_socket_ready_read {
 				# In HSP mode we do not support telephony functions
 				print "Requested for content of SMS with index $1 but telephony functions are not supported in HSP profile\n";
 				hsphfpd_socket_write($endpoint, 'ERROR') or return;
-			} elsif ($line =~ /^AT\+XAPL=[0-9A-Fa-f]+-[0-9A-Fa-f]+-[0-9]+,\s*([0-9]+)$/) {
+			} elsif ($line =~ /^AT\+XAPL=[0-9A-Fa-f]+-[0-9A-Fa-f]+-[^\n\r,]+,\s*([0-9]+)$/) {
 				my $apple_features = int($1);
 				print "Apple features changed event\n";
 				my %apple_features;
@@ -1768,7 +1768,7 @@ sub hsphfpd_socket_ready_read {
 			} elsif ($line =~ /^AT\+CSRPWR=([1-2])$/) {
 				hsphfpd_csr_power_source_changed($endpoint, $1);
 				hsphfpd_socket_write($endpoint, 'OK') or return;
-			} elsif ($line =~ /^AT\+XAPL=[0-9A-Fa-f]+-[0-9A-Fa-f]+-[0-9]+,\s*([0-9]+)$/) {
+			} elsif ($line =~ /^AT\+XAPL=[0-9A-Fa-f]+-[0-9A-Fa-f]+-[^\n\r,]+,\s*([0-9]+)$/) {
 				my $apple_features = int($1);
 				print "Apple features changed event\n";
 				my %apple_features;
