@@ -1675,13 +1675,13 @@ sub hsphfpd_socket_ready_read {
 				print "Request for list of supported HF indicators\n";
 				# We report all defined HF indicators are supported
 				my $indicators = join ',', sort { $a <=> $b } keys %hf_indicators_map;
-				hsphfpd_socked_write($endpoint, "+BIND: ($indicators)") or return;
+				hsphfpd_socket_write($endpoint, "+BIND: ($indicators)") or return;
 				hsphfpd_socket_write($endpoint, 'OK') or return;
 			} elsif ($line eq 'AT+BIND?') {
 				print "Request for status of HF indicators\n";
 				# We report that we want to receive updates of all defined HF indicators
 				foreach (sort { $a <=> $b } keys %hf_indicators_map) {
-					hsphfpd_socked_write($endpoint, "+BIND: $_,1") or return;
+					hsphfpd_socket_write($endpoint, "+BIND: $_,1") or return;
 				}
 				hsphfpd_socket_write($endpoint, 'OK') or return;
 
