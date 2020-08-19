@@ -243,8 +243,19 @@ my $bluez_object_manager = $bluez_service->get_object('/', 'org.freedesktop.DBus
 $bluez_object_manager->connect_to_signal('InterfacesAdded', \&bluez_interfaces_added);
 $bluez_object_manager->connect_to_signal('InterfacesRemoved', \&bluez_interfaces_removed);
 
-my $sco_listening_socket;
 print "Creating listening SCO socket\n";
+
+# Check that there is no other software with SCO socket in listening state which can steal new SCO connections and therefore completely break hsphfpd
+open my $sco_existing_sockets, '<', '/sys/kernel/debug/bluetooth/sco' or die "Cannot open file /sys/kernel/debug/bluetooth/sco: $!" . ($!{ENOENT} ? ', maybe debugfs is not mounted?' : '') . "\n";
+while (<$sco_existing_sockets>) {
+	chomp $_;
+	my ($src, $dst, $state) = split /\s+/, $_;
+	# BT_LISTEN => 4
+	die "Listening SCO socket is already open by other application, maybe broken ofono is running?\n" if $state == 4;
+}
+close $sco_existing_sockets;
+
+my $sco_listening_socket;
 # PF_BLUETOOTH => 31, SOCK_SEQPACKET => 5, BTPROTO_SCO => 2
 socket $sco_listening_socket, 31, 5, 2 or print "Opening SCO listening socket failed: $!\n";
 if ($sco_listening_socket) {
