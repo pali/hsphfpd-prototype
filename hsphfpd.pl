@@ -265,9 +265,16 @@ if ($sco_listening_socket) {
 # SOL_BLUETOOTH => 274, BT_DEFER_SETUP => 7, int
 my $kernel_defer_support = defined $sco_listening_socket && defined setsockopt $sco_listening_socket, 274, 7, pack 'i', 1;
 # SOL_BLUETOOTH => 274, BT_VOICE => 11, struct bt_voice { uint16_t setting; }
-my $kernel_msbc_support = $kernel_defer_support && defined getsockopt $sco_listening_socket, 274, 11;
-# SOL_BLUETOOTH => 274, BT_VOICE_SETUP => 14, ...
-my $kernel_anycodec_support = $kernel_defer_support && defined getsockopt $sco_listening_socket, 274, 14;
+my $kernel_soft_msbc_support = $kernel_defer_support && defined getsockopt $sco_listening_socket, 274, 11;
+# NOTE: kernel currently blocks usage of non-whitelisted codecs and does not provide API for using other codecs
+my $kernel_anycodec_support = 0;
+print "Supported codecs combination on SCO socket by kernel:\n";
+if ($kernel_anycodec_support) {
+	print "Any combination supported by adapter\n";
+} else {
+	print "Air codec CVSD with agent codec PCM_s16le_8kHz\n";
+	print "Air codec mSBC with agent codec mSBC\n" if $kernel_soft_msbc_support;
+}
 if ($sco_listening_socket) {
 	if (listen $sco_listening_socket, 10) {
 		$reactor->add_read(fileno $sco_listening_socket, sub { hsphfpd_accept_audio() });
@@ -2082,7 +2089,6 @@ sub hsphfpd_connect_endpoint {
 			my ($vendor, $product, $version) = map { hex $_ } $endpoints{$endpoint}->{modalias} =~ /^[^:]*:v([0-9a-fA-F]*)p([0-9a-fA-F]*)d([0-9a-fA-F]*)$/;
 			$vendor //= $product //= $version //= 0;
 			print "Creating uinput device for endpoint $endpoint: $name\n";
-			# Opening uinput device may fail if we are not running under root, so do not die
 			open $uinput, '>', '/dev/uinput' or $!{ENOENT} && open $uinput, '>', '/dev/input/uinput' or $!{ENOENT} && open $uinput, '>', '/dev/misc/uinput' or do { print "Cannot open uinput device: $!\n"; last };
 			# UI_SET_EVBIT => 1074025828, EV_KEY => 1
 			ioctl $uinput, 1074025828, 1 or do { print "Cannot call ioctl UI_SET_EVBIT EV_KEY on uinput device: $!\n"; last };
@@ -2291,34 +2297,83 @@ sub bluez_interfaces_added {
 		my $address = $adapter_props->{Address};
 		last unless ref $address eq '';
 		my %codecs;
-		if ($kernel_anycodec_support) {
-			# TODO: use HCI commands to checks which codecs are really supported by adapter
-			# But it needs root privileges and anycodec support is in implemented in kernel yet
-			$codecs{CVSD}->{$_} = $codecs{alaw}->{$_} = $codecs{ulaw}->{$_} = 1 foreach qw(alaw ulaw PCM_s16le_8kHz PCM_u16le_8kHz PCM_s8le_8kHz PCM_u8le_8kHz);
-			$codecs{$_}->{$_} = 1 foreach qw(AuriStream_2bit_8kHz AuriStream_2bit_16kHz AuriStream_4bit_8kHz AuriStream_4bit_16kHz mSBC);
-		} elsif ($kernel_msbc_support) {
-			if ($adapter =~ /hci([0-9]+)$/) {
-				# Check that adapter supports eSCO link and transparent air codec
-				my $hci_id = $1;
-				# PF_BLUETOOTH => 31, SOCK_RAW => 3, BTPROTO_HCI => 1
-				if (socket my $hci_socket, 31, 3, 1) {
-					# AF_BLUETOOTH => 31, struct sockaddr_hci { sa_family_t hci_family; unsigned short hci_dev; unsigned short hci_channel; }, sa_family_t = uint16_t
-					if (bind $hci_socket, pack 'SS!S!', 31, $hci_id, 0) {
+
+		if ($adapter =~ /hci([0-9]+)$/) {
+			my $hci_id = $1;
+			# PF_BLUETOOTH => 31, SOCK_RAW => 3, BTPROTO_HCI => 1
+			if (socket my $hci_socket, 31, 3, 1) {
+				# AF_BLUETOOTH => 31, struct sockaddr_hci { sa_family_t hci_family; unsigned short hci_dev; unsigned short hci_channel; }, sa_family_t = uint16_t
+				if (bind $hci_socket, pack 'SS!S!', 31, $hci_id, 0) {
+					my (@ext_features, $local_commands, %local_codecs);
+					@ext_features = hci_ext_features($hci_socket);
+					if (@ext_features) {
+						$local_commands = hci_local_commands($hci_socket);
+						my @local_codecs = (defined $local_commands and vec $local_commands, 237, 1) ? hci_local_codecs($hci_socket) : ();
+						%local_codecs = map { $_ => 1 } @local_codecs;
+					} else {
 						my $dev_info = "\0" x 92;
-						# HCIGETDEVINFO => 2147764435;
+						# HCIGETDEVINFO => 2147764435
 						if (ioctl $hci_socket, 2147764435, $dev_info) {
-							my @features = unpack 'C8', substr $dev_info, 21, 8;
-							my $esco_link = ($features[3] & (1 << 7));
-							my $transparent_air_coding = ($features[2] & (1 << 3));
-							$codecs{mSBC}->{mSBC} = 1 if $esco_link and $transparent_air_coding;
+							@ext_features = unpack 'C8', substr $dev_info, 21, 8;
 						}
 					}
-					close $hci_socket;
+					my $esco_link = ($ext_features[3] & (1 << 7));
+					my $ulaw_air_coding = (defined $ext_features[1] and ($ext_features[1] & (1 << 6)));
+					my $alaw_air_coding = (defined $ext_features[1] and ($ext_features[1] & (1 << 7)));
+					my $cvsd_air_coding = (defined $ext_features[2] and ($ext_features[2] & (1 << 0)));
+					my $transparent_air_coding = (defined $ext_features[2] and ($ext_features[2] & (1 << 3)));
+					my @main_air_codecs;
+					push @main_air_codecs, 'ulaw' if $ulaw_air_coding;
+					push @main_air_codecs, 'alaw' if $alaw_air_coding;
+					push @main_air_codecs, 'CVSD' if $cvsd_air_coding;
+					print "Supported air codecs for adapter $adapter:\n";
+					print "$_\n" foreach @main_air_codecs;
+					do { print "$_\n" foreach qw(AuriStream_2bit_8kHz AuriStream_2bit_16kHz AuriStream_4bit_8kHz AuriStream_4bit_16kHz mSBC) } if $esco_link and $transparent_air_coding;
+					print "Supported agent codecs for adapter $adapter:\n";
+					if (keys %local_codecs) {
+						print "ulaw\n" if $local_codecs{0x00};
+						print "alaw\n" if $local_codecs{0x01};
+						print "CVSD\n" if $local_codecs{0x02};
+						do { print "$_\n" foreach qw(AuriStream_2bit_8kHz AuriStream_2bit_16kHz AuriStream_4bit_8kHz AuriStream_4bit_16kHz mSBC) } if $local_codecs{0x03};
+						do { print "$_\n" foreach qw(PCM_s16le_8kHz PCM_u16le_8kHz PCM_s8le_8kHz PCM_u8le_8kHz) } if $local_codecs{0x04};
+						print "mSBC\n" if $local_codecs{0x05};
+					} else {
+						print "ulaw\n" if $ulaw_air_coding;
+						print "alaw\n" if $alaw_air_coding;
+						do { print "$_\n" foreach qw(AuriStream_2bit_8kHz AuriStream_2bit_16kHz AuriStream_4bit_8kHz AuriStream_4bit_16kHz mSBC) } if $esco_link and $transparent_air_coding;
+						print "$_\n" foreach qw(PCM_s16le_8kHz PCM_u16le_8kHz PCM_s8le_8kHz PCM_u8le_8kHz);
+					}
+					if ($kernel_anycodec_support) {
+						if (keys %local_codecs) {
+							foreach my $air_codec (@main_air_codecs) {
+								$codecs{$air_codec}->{ulaw} = 1 if $local_codecs{0x00};
+								$codecs{$air_codec}->{alaw} = 1 if $local_codecs{0x01};
+								$codecs{$air_codec}->{CVSD} = 1 if $local_codecs{0x02};
+								do { $codecs{$air_codec}->{$_} = 1 foreach qw(PCM_s16le_8kHz PCM_u16le_8kHz PCM_s8le_8kHz PCM_u8le_8kHz) } if $local_codecs{0x04};
+								$codecs{$air_codec}->{mSBC} = 1 if $local_codecs{0x05};
+							}
+							if ($local_codecs{0x03} and $esco_link and $transparent_air_coding) {
+								$codecs{$_}->{$_} = 1 foreach qw(AuriStream_2bit_8kHz AuriStream_2bit_16kHz AuriStream_4bit_8kHz AuriStream_4bit_16kHz mSBC);
+							}
+						} else {
+							foreach my $air_codec (@main_air_codecs) {
+								$codecs{$air_codec}->{ulaw} = 1 if $ulaw_air_coding;
+								$codecs{$air_codec}->{alaw} = 1 if $alaw_air_coding;
+								$codecs{$air_codec}->{$_} = 1 foreach qw(PCM_s16le_8kHz PCM_u16le_8kHz PCM_s8le_8kHz PCM_u8le_8kHz);
+							}
+							if ($esco_link and $transparent_air_coding) {
+								$codecs{$_}->{$_} = 1 foreach qw(AuriStream_2bit_8kHz AuriStream_2bit_16kHz AuriStream_4bit_8kHz AuriStream_4bit_16kHz mSBC);
+							}
+						}
+					} elsif ($kernel_soft_msbc_support) {
+						$codecs{mSBC}->{mSBC} = 1 if $esco_link and $transparent_air_coding;
+					}
 				}
+				close $hci_socket;
 			}
 		}
 		$codecs{CVSD}->{PCM_s16le_8kHz} = 1; # This default codec should be always supported by adapter
-		print "Supported codecs combination for adapter $adapter:\n";
+		print "Supported codecs combination for adapter $adapter by kernel:\n";
 		print "Air codec $_ with agent codecs: " . (join ', ', sort keys %{$codecs{$_}}) . "\n" foreach sort keys %codecs;
 		$adapters{$adapter} = { address => $address, devices => {}, codecs => \%codecs };
 		print "added: adapter=$adapter address=$address\n";
@@ -2416,6 +2471,83 @@ sub bluez_interfaces_removed {
 			print "removed: device=$device\n";
 		}
 	}
+}
+
+sub hci_cmd {
+	my ($hci_socket, $ogf, $ocf, $text, $data) = @_;
+	my $opcode = ($ogf << 10) | $ocf;
+	# SOL_HCI => 0, HCI_FILTER => 2
+	setsockopt $hci_socket, 0, 2, pack 'VVVv', 0b10000, 0b1100000000000001, 0b1000000000000000000000000000000, $opcode or do { print "Cannot set HCI_FILTER for $text command on bluetooth socket: $!\n"; return };
+	# HCI_COMMAND_PKT => 1
+	my $req = pack('CvC', 1, $opcode, length $data) . $data;
+	my $req_len = syswrite $hci_socket, $req or do { print "Cannot send $text command to bluetooth socket: $!\n"; return };
+	do { print "Cannot send $text command to bluetooth socket: Data were truncated\n"; return } unless length $req == $req_len;
+	my $in = ''; vec($in, fileno($hci_socket), 1) = 1;
+	my $ret = select my $rout = $in, undef, my $eout = $in, 10;
+	do { print "Cannot wait for $text command response from bluetooth socket: $!\n"; return } if $ret < 0;
+	do { print "No response for $text command from bluetooth socket\n"; return } if $ret == 0;
+	my $resp_len = sysread $hci_socket, (my $resp), 1024;
+	do { print "Cannot read $text command response from bluetooth socket: $!\n"; return } unless defined $resp_len;
+	do { print "Invalid response for $text command from bluetooth socket\n"; return } unless $resp_len >= 3 and length $resp >= 3;
+	my ($type, $event, $len, $command, $resp_opcode) = unpack 'CCCCv', $resp;
+	# HCI_EVENT_PKT => 4
+	do { print "Invalid response for $text command from bluetooth socket\n"; return } unless $type == 4;
+	# EVT_CMD_STATUS => 0x0F
+	if ($event == 0x0F) {
+		do { print "Invalid response for $text command from bluetooth socket\n"; return } unless $len >= 4 and $resp_len >= 7 and length $resp >= 7;
+		my ($status, $command, $resp_opcode) = unpack 'CCv', substr $resp, 3;
+		# EVT_INQUIRY_COMPLETE => 1
+		do { print "Invalid response for $text command from bluetooth socket\n"; return } unless $command == 1 and $resp_opcode == $opcode and $status;
+		print "$text command on bluetooth socket failed: $status\n";
+		return;
+	# EVT_CMD_COMPLETE => 0x0E
+	} elsif ($event == 0x0E) {
+		do { print "Invalid response for $text command from bluetooth socket\n"; return } unless $len >= 3 and $resp_len >= 6 and length $resp >= 6;
+		my ($command, $resp_opcode) = unpack 'Cv', substr $resp, 3;
+		# EVT_INQUIRY_COMPLETE => 1
+		do { print "Invalid response for $text command from bluetooth socket\n"; return } unless $command == 1 and $resp_opcode == $opcode;
+	} else {
+		print "Invalid response for $text command from bluetooth socket\n";
+		return;
+	}
+	return $len-3, substr $resp, 6;
+}
+
+sub hci_local_commands {
+	my ($hci_socket) = @_;
+	# OGF_INFO_PARAM => 4, OCF_READ_LOCAL_COMMANDS => 0x02
+	my ($local_commands_len, $local_commands_packed) = hci_cmd($hci_socket, 4, 0x02, 'READ_LOCAL_COMMANDS', '');
+	return unless defined $local_commands_len;
+	do { print "Invalid response for READ_LOCAL_COMMANDS command from bluetooth socket\n"; return } unless $local_commands_len == 65 and length $local_commands_packed >= 65;
+	my ($local_commands_status) = unpack 'C', $local_commands_packed;
+	do { print "READ_LOCAL_COMMANDS command on bluetooth socket failed: $local_commands_status"; return } unless $local_commands_status == 0;
+	return substr $local_commands_packed, 1;
+}
+
+sub hci_ext_features {
+	my ($hci_socket) = @_;
+	# OGF_INFO_PARAM => 4, OCF_READ_LOCAL_EXT_FEATURES => 0x04
+	my ($ext_features_len, $ext_features_packed) = hci_cmd($hci_socket, 4, 0x04, 'READ_LOCAL_EXT_FEATURES', pack 'C', 0);
+	return unless defined $ext_features_len;
+	do { print "Invalid response for READ_LOCAL_EXT_FEATURES command from bluetooth socket\n"; return } unless $ext_features_len == 11 and length $ext_features_packed >= 11;
+	my ($ext_features_status, $ext_features_page_num, undef, @ext_features) = unpack 'CCCC8', $ext_features_packed;
+	do { print "READ_LOCAL_EXT_FEATURES command on bluetooth socket failed: $ext_features_status"; return } unless $ext_features_status == 0;
+	do { print "Invalid response for READ_LOCAL_EXT_FEATURES command from bluetooth socket\n"; return } unless $ext_features_page_num == 0;
+	return @ext_features;
+}
+
+sub hci_local_codecs {
+	my ($hci_socket) = @_;
+	# OGF_INFO_PARAM => 4, OCF_READ_LOCAL_CODECS => 0x0B
+	my ($local_codecs_len, $local_codecs_packed) = hci_cmd($hci_socket, 4, 0x0B, 'READ_LOCAL_CODECS', '');
+	return unless defined $local_codecs_len;
+	do { print "Invalid response for READ_LOCAL_CODECS command from bluetooth socket\n"; return } unless $local_codecs_len >= 2 and length $local_codecs_packed >= 2;
+	my ($local_codecs_status, $local_codecs_count) = unpack 'CC', $local_codecs_packed;
+	do { print "READ_LOCAL_CODECS command on bluetooth socket failed: $local_codecs_status"; return } unless $local_codecs_status == 0;
+	do { print "Invalid response for READ_LOCAL_CODECS command from bluetooth socket\n"; return } unless length $local_codecs_packed >= 2+$local_codecs_count+1;
+	my $local_vendor_codecs_count = unpack 'C', substr $local_codecs_packed, 2+$local_codecs_count, 1;
+	do { print "Invalid response for READ_LOCAL_CODECS command from bluetooth socket\n"; return } unless length $local_codecs_packed >= 2+$local_codecs_count+1+4*$local_vendor_codecs_count;
+	return unpack 'C*', substr $local_codecs_packed, 2, $local_codecs_count;
 }
 
 {
