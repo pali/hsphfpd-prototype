@@ -485,7 +485,7 @@ sub hsphfpd_our_battery_level {
 				hsphfpd_csr_send_battery_level($endpoint);
 			}
 			if (exists $endpoints{$endpoint}->{apple_features}->{'apple-battery-level'} and $our_battery_level != -1) {
-				hsphfpd_socket_write($endpoint, "AT+IPHONEACCEV=1,1," . int(9 * $our_battery_level / 100 + 0.5));
+				hsphfpd_socket_write($endpoint, "AT+IPHONEACCEV=1,1," . int(($our_battery_level-1)/10));
 			}
 			if (exists $endpoints{$endpoint}->{hf_indicators}->{'battery-level'} and $our_battery_level != -1) {
 				hsphfpd_socket_write($endpoint, "AT+BIEV=$hf_indicator_battery,$our_battery_level");
@@ -1271,7 +1271,7 @@ sub hsphfpd_csr_battery_level_changed {
 	print "CSR battery level changed\n";
 	# CSR battery level is only in range 0-9 but HF battery level is range 0-100, so prefer usage of HF
 	return if exists $endpoints{$endpoint}->{hf_indicators}->{'battery-level'};
-	$endpoints{$endpoint}->{properties}->{BatteryLevel} = dbus_int16(($level >= 0 && $level <= 9) ? ($level * 100 / 9) : -1);
+	$endpoints{$endpoint}->{properties}->{BatteryLevel} = dbus_int16(($level >= 0 && $level <= 9) ? (($level + 1) * 10) : -1);
 	$endpoints{$endpoint}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.Endpoint', { BatteryLevel => $endpoints{$endpoint}->{properties}->{BatteryLevel} }, []);
 }
 
@@ -1431,7 +1431,7 @@ sub hsphfpd_csr_send_battery_level {
 			hsphfpd_socket_write($endpoint, 'AT+CSR=(4,1)') or return;
 			hsphfpd_socket_wait_for_ok_error($endpoint);
 		}
-		hsphfpd_socket_write($endpoint, 'AT+CSRBATT=' . int((9 * $our_battery_level / 100) + 0.5)) or return;
+		hsphfpd_socket_write($endpoint, 'AT+CSRBATT=' . int(($our_battery_level-1)/10)) or return;
 	} else {
 		if (not $endpoints{$endpoint}->{ag_csr_battery_disabled}) {
 			$endpoints{$endpoint}->{ag_csr_battery_disabled} = 1;
@@ -1543,7 +1543,7 @@ sub hsphfpd_socket_ready_read {
 							print "Apple battery level changed\n";
 							# Apple battery level is only in range 0-9 but HF battery level is range 0-100, so prefer usage of HF
 							if (not exists $endpoints{$endpoint}->{hf_indicators}->{'battery-level'}) {
-								$endpoints{$endpoint}->{properties}->{BatteryLevel} = dbus_int16(($val >= 0 && $val <= 9) ? ($val * 100 / 9) : -1);
+								$endpoints{$endpoint}->{properties}->{BatteryLevel} = dbus_int16(($val >= 0 && $val <= 9) ? (($val + 1) * 10) : -1);
 								$endpoints{$endpoint}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.Endpoint', { BatteryLevel => $endpoints{$endpoint}->{properties}->{BatteryLevel} }, []);
 							}
 						} elsif ($key == 2 and $val >= 0 and $val <= 1) {
@@ -1808,7 +1808,7 @@ sub hsphfpd_socket_ready_read {
 							print "Apple battery level changed\n";
 							# Apple battery level is only in range 0-9 but HF battery level is range 0-100, so prefer usage of HF
 							if (not exists $endpoints{$endpoint}->{hf_indicators}->{'battery-level'}) {
-								$endpoints{$endpoint}->{properties}->{BatteryLevel} = dbus_int16(($val >= 0 && $val <= 9) ? ($val * 100 / 9) : -1);
+								$endpoints{$endpoint}->{properties}->{BatteryLevel} = dbus_int16(($val >= 0 && $val <= 9) ? (($val + 1) * 10) : -1);
 								$endpoints{$endpoint}->{object}->emit_signal('PropertiesChanged', 'org.hsphfpd.Endpoint', { BatteryLevel => $endpoints{$endpoint}->{properties}->{BatteryLevel} }, []);
 							}
 						} elsif ($key == 2 and $val >= 0 and $val <= 1) {
