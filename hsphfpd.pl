@@ -485,7 +485,7 @@ sub hsphfpd_our_battery_level {
 				hsphfpd_csr_send_battery_level($endpoint);
 			}
 			if (exists $endpoints{$endpoint}->{apple_features}->{'apple-battery-level'} and $our_battery_level != -1) {
-				hsphfpd_socket_write($endpoint, "AT+IPHONEACCEV=1,1," . int($our_battery_level / 10 - 1));
+				hsphfpd_socket_write($endpoint, "AT+IPHONEACCEV=1,1," . int(($our_battery_level-1)/10));
 			}
 			if (exists $endpoints{$endpoint}->{hf_indicators}->{'battery-level'} and $our_battery_level != -1) {
 				hsphfpd_socket_write($endpoint, "AT+BIEV=$hf_indicator_battery,$our_battery_level");
@@ -1431,7 +1431,7 @@ sub hsphfpd_csr_send_battery_level {
 			hsphfpd_socket_write($endpoint, 'AT+CSR=(4,1)') or return;
 			hsphfpd_socket_wait_for_ok_error($endpoint);
 		}
-		hsphfpd_socket_write($endpoint, 'AT+CSRBATT=' . int($our_battery_level / 10 - 1)) or return;
+		hsphfpd_socket_write($endpoint, 'AT+CSRBATT=' . int(($our_battery_level-1)/10)) or return;
 	} else {
 		if (not $endpoints{$endpoint}->{ag_csr_battery_disabled}) {
 			$endpoints{$endpoint}->{ag_csr_battery_disabled} = 1;
