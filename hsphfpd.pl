@@ -552,7 +552,7 @@ sub hsphfpd_connect_telephony {
 		if ($error) {
 			print "All registered applications rejected telephony socket\n";
 		} else {
-			print "There is no application with telephony agent\n";
+			print "There is no application with telephony agent for role $role\n";
 		}
 		return;
 	}
