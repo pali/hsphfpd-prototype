@@ -232,6 +232,8 @@ my $bus_object = $bus->get_bus_object();
 $bus_object->connect_to_signal('NameOwnerChanged', \&bus_name_owner_changed);
 
 my $hsphfpd_service = $bus->export_service('org.hsphfpd');
+die "Registering org.hsphfpd on DBus failed, maybe hsphfpd is already running?\n" unless $bus->get_service_owner('org.hsphfpd') eq $bus->get_unique_name();
+
 my $hsphfpd_manager = main::Manager->new($hsphfpd_service, '/');
 main::Profile->new($hsphfpd_manager, "org/bluez/profile/$_") foreach qw(hsp_ag hsp_hs hfp_ag hfp_hf);
 main::PowerSupply->new($hsphfpd_manager, 'org/hsphfpd/power_supply');
@@ -244,24 +246,16 @@ $bluez_object_manager->connect_to_signal('InterfacesAdded', \&bluez_interfaces_a
 $bluez_object_manager->connect_to_signal('InterfacesRemoved', \&bluez_interfaces_removed);
 
 print "Creating listening SCO socket\n";
-
-# Check that there is no other software with SCO socket in listening state which can steal new SCO connections and therefore completely break hsphfpd
-open my $sco_existing_sockets, '<', '/sys/kernel/debug/bluetooth/sco' or die "Cannot open file /sys/kernel/debug/bluetooth/sco: $!" . ($!{ENOENT} ? ', maybe debugfs is not mounted?' : '') . "\n";
-while (<$sco_existing_sockets>) {
-	chomp $_;
-	my ($src, $dst, $state) = split /\s+/, $_;
-	# BT_LISTEN => 4
-	die "Listening SCO socket is already open by other application, maybe broken ofono is running?\n" if $state == 4;
-}
-close $sco_existing_sockets;
-
+check_for_existing_sco_sockets();
 my $sco_listening_socket;
 # PF_BLUETOOTH => 31, SOCK_SEQPACKET => 5, BTPROTO_SCO => 2
-socket $sco_listening_socket, 31, 5, 2 or print "Opening SCO listening socket failed: $!\n";
-if ($sco_listening_socket) {
-	# AF_BLUETOOTH => 31, struct sockaddr_sco { sa_family_t sco_family; bdaddr_t sco_bdaddr; }, sa_family_t = uint16_t, bdaddr_t = uint8_t[6] (in reverse order)
-	bind $sco_listening_socket, pack 'S(H2)6', 31, reverse split /:/, "00:00:00:00:00:00" or do { print "Binding listening SCO socket to local address failed: $!\n"; close $sco_listening_socket; undef $sco_listening_socket; };
-}
+socket $sco_listening_socket, 31, 5, 2 or die "Opening SCO listening socket failed: $!\n";
+# AF_BLUETOOTH => 31, struct sockaddr_sco { sa_family_t sco_family; bdaddr_t sco_bdaddr; }, sa_family_t = uint16_t, bdaddr_t = uint8_t[6] (in reverse order)
+bind $sco_listening_socket, pack 'S(H2)6', 31, reverse split /:/, "00:00:00:00:00:00" or die "Binding listening SCO socket to local address failed: $!\n";
+listen $sco_listening_socket, 10 or die "Listening on SCO socket failed: $!\n";
+$reactor->add_read(fileno $sco_listening_socket, sub { hsphfpd_accept_audio() });
+$reactor->add_timeout(10_000, sub { check_for_existing_sco_sockets() });
+
 # SOL_BLUETOOTH => 274, BT_DEFER_SETUP => 7, int
 my $kernel_defer_support = defined $sco_listening_socket && defined setsockopt $sco_listening_socket, 274, 7, pack 'i', 1;
 # SOL_BLUETOOTH => 274, BT_VOICE => 11, struct bt_voice { uint16_t setting; }
@@ -275,20 +269,20 @@ if ($kernel_anycodec_support) {
 	print "Air codec CVSD with agent codec PCM_s16le_8kHz\n";
 	print "Air codec mSBC with agent codec mSBC\n" if $kernel_soft_msbc_support;
 }
-if ($sco_listening_socket) {
-	if (listen $sco_listening_socket, 10) {
-		$reactor->add_read(fileno $sco_listening_socket, sub { hsphfpd_accept_audio() });
-	} else {
-		print "Listening on SCO socket failed: $!\n";
-		close $sco_listening_socket;
-		undef $sco_listening_socket;
-	}
-}
 
 bluez_enumerate_objects();
 
 $SIG{INT} = $SIG{TERM} = sub {
 	print "\nReceived signal, exiting...\n";
+	quit();
+};
+
+$reactor->run();
+exit 0;
+
+### Subroutines ###
+
+sub quit {
 	exit 0 unless $reactor->{running};
 	if (defined $sco_listening_socket) {
 		print "Closing SCO listening socket\n";
@@ -299,12 +293,28 @@ $SIG{INT} = $SIG{TERM} = sub {
 	hsphfpd_unregister_application_i($_) foreach reverse 0..$#applications;
 	bluez_release_profiles();
 	$reactor->shutdown();
-};
+}
 
-$reactor->run();
-exit 0;
-
-### Subroutines ###
+sub check_for_existing_sco_sockets {
+	# Check that there is no other software with SCO socket in listening state which can steal new SCO connections and therefore completely break hsphfpd
+	my $count = 0;
+	open my $existing_sco_sockets, '<', '/sys/kernel/debug/bluetooth/sco' or die "Cannot open file /sys/kernel/debug/bluetooth/sco: $!" . ($!{ENOENT} ? ', maybe debugfs is not mounted?' : '') . "\n";
+	while (<$existing_sco_sockets>) {
+		chomp $_;
+		my ($src, $dst, $state) = split /\s+/, $_;
+		# BT_LISTEN => 4
+		$count++ if $state == 4;
+	}
+	close $existing_sco_sockets;
+	if (defined $sco_listening_socket) {
+		return unless $count > 1;
+		print "Some other application opened listening SCO socket, exiting... maybe broken ofono was started?\n";
+		quit();
+	} else {
+		return unless $count > 0;
+		die "Listening SCO socket is already open by other application, maybe broken ofono is running?\n";
+	}
+}
 
 sub bus_name_owner_changed {
 	my ($name, $old, $new) = @_;
