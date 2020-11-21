@@ -842,26 +842,30 @@ Properties
 
 
 Possible agent codecs:
+PCM_u8le_8kHz
+PCM_s8le_8kHz
 alaw
 ulaw
 CVSD
 AuriStream_2bit_8kHz
-AuriStream_2bit_16kHz
 AuriStream_4bit_8kHz
+PCM_u16le_8kHz
+PCM_s16le_8kHz
+PCM_u8le_16kHz
+PCM_s8le_16kHz
+AuriStream_2bit_16kHz
 AuriStream_4bit_16kHz
 mSBC
-PCM_s16le_8kHz
-PCM_u16le_8kHz
-PCM_s8le_8kHz
-PCM_u8le_8kHz
+PCM_u16le_16kHz
+PCM_s16le_16kHz
 
 Possible air codecs:
 alaw
 ulaw
 CVSD
 AuriStream_2bit_8kHz
-AuriStream_2bit_16kHz
 AuriStream_4bit_8kHz
+AuriStream_2bit_16kHz
 AuriStream_4bit_16kHz
 mSBC
 
