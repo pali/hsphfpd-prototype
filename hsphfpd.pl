@@ -203,12 +203,10 @@ my %ag_profile_features_mask;
 my $our_power_source = 'unknown';
 my $our_battery_level = -1;
 
-my $fd_num = 0;
-
 # bluez adapter: /org/bluez/hciX
 # bluez device: /org/bluez/hciX/dev_XX_XX_XX_XX_XX_XX
 # hsphfpd endpoint: /org/hsphfpd/hciX/dev_XX_XX_XX_XX_XX_XX/XXX_XX
-# hsphfpd audio transport: /org/hsphfpd/hciX/dev_XX_XX_XX_XX_XX_XX/audio_fdX
+# hsphfpd audio transport: /org/hsphfpd/hciX/dev_XX_XX_XX_XX_XX_XX/audio
 # hsphfpd profile path: /org/bluez/profile/XXX_XX
 # hsphfpd profile: XXX_XX
 # hsphfpd application: {service, path, manager, sig1, sig2, [agents], [audios], [telephonys]}
@@ -949,9 +947,8 @@ sub hsphfpd_establish_audio {
 
 	my $air_codec = $endpoints{$endpoint}->{selected_codec};
 
-	$fd_num++;
 	my $audio = $endpoint;
-	$audio =~ s{/[^/]*$}{/audio_fd$fd_num};
+	$audio =~ s{/[^/]*$}{/audio};
 
 	my $hsphfpd_manager_path = $hsphfpd_manager->get_object_path();
 	my $audio_suffix = $audio;
