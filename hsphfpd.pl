@@ -2345,13 +2345,13 @@ sub bluez_interfaces_added {
 						print "alaw\n" if $local_codecs{0x01};
 						print "CVSD\n" if $local_codecs{0x02};
 						do { print "$_\n" foreach qw(AuriStream_2bit_8kHz AuriStream_2bit_16kHz AuriStream_4bit_8kHz AuriStream_4bit_16kHz mSBC) } if $local_codecs{0x03};
-						do { print "$_\n" foreach qw(PCM_s16le_8kHz PCM_u16le_8kHz PCM_s8le_8kHz PCM_u8le_8kHz PCM_s16le_16kHz PCM_u16le_16kHz PCM_s8le_16kHz PCM_u8le_16kHz) } if $local_codecs{0x04};
+						do { print "$_\n" foreach qw(PCM_s16le_8kHz PCM_u16le_8kHz PCM_s8_8kHz PCM_u8_8kHz PCM_s16le_16kHz PCM_u16le_16kHz PCM_s8_16kHz PCM_u8_16kHz) } if $local_codecs{0x04};
 						print "mSBC\n" if $local_codecs{0x05};
 					} else {
 						print "ulaw\n" if $ulaw_air_coding;
 						print "alaw\n" if $alaw_air_coding;
 						do { print "$_\n" foreach qw(AuriStream_2bit_8kHz AuriStream_2bit_16kHz AuriStream_4bit_8kHz AuriStream_4bit_16kHz mSBC) } if $esco_link and $transparent_air_coding;
-						print "$_\n" foreach qw(PCM_s16le_8kHz PCM_u16le_8kHz PCM_s8le_8kHz PCM_u8le_8kHz);
+						print "$_\n" foreach qw(PCM_s16le_8kHz PCM_u16le_8kHz PCM_s8_8kHz PCM_u8_8kHz);
 					}
 					if ($kernel_anycodec_support) {
 						if (keys %local_codecs) {
@@ -2359,7 +2359,7 @@ sub bluez_interfaces_added {
 								$codecs{$air_codec}->{ulaw} = 1 if $local_codecs{0x00};
 								$codecs{$air_codec}->{alaw} = 1 if $local_codecs{0x01};
 								$codecs{$air_codec}->{CVSD} = 1 if $local_codecs{0x02};
-								do { $codecs{$air_codec}->{$_} = 1 foreach qw(PCM_s16le_8kHz PCM_u16le_8kHz PCM_s8le_8kHz PCM_u8le_8kHz PCM_s16le_16kHz PCM_u16le_16kHz PCM_s8le_16kHz PCM_u8le_16kHz) } if $local_codecs{0x04};
+								do { $codecs{$air_codec}->{$_} = 1 foreach qw(PCM_s16le_8kHz PCM_u16le_8kHz PCM_s8_8kHz PCM_u8_8kHz PCM_s16le_16kHz PCM_u16le_16kHz PCM_s8_16kHz PCM_u8_16kHz) } if $local_codecs{0x04};
 								$codecs{$air_codec}->{mSBC} = 1 if $local_codecs{0x05};
 							}
 							if ($local_codecs{0x03} and $esco_link and $transparent_air_coding) {
@@ -2369,7 +2369,7 @@ sub bluez_interfaces_added {
 							foreach my $air_codec (@main_air_codecs) {
 								$codecs{$air_codec}->{ulaw} = 1 if $ulaw_air_coding;
 								$codecs{$air_codec}->{alaw} = 1 if $alaw_air_coding;
-								$codecs{$air_codec}->{$_} = 1 foreach qw(PCM_s16le_8kHz PCM_u16le_8kHz PCM_s8le_8kHz PCM_u8le_8kHz);
+								$codecs{$air_codec}->{$_} = 1 foreach qw(PCM_s16le_8kHz PCM_u16le_8kHz PCM_s8_8kHz PCM_u8_8kHz);
 							}
 							if ($esco_link and $transparent_air_coding) {
 								$codecs{$_}->{$_} = 1 foreach qw(AuriStream_2bit_8kHz AuriStream_2bit_16kHz AuriStream_4bit_8kHz AuriStream_4bit_16kHz mSBC);
