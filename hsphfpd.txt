@@ -231,7 +231,7 @@ Methods
 
 Service		org.hsphfpd
 Interface	org.hsphfpd.Endpoint
-Object		/org/hsphfpd/hciX/dev_XX_XX_XX_XX_XX_XX/XXX_XX
+Object		<dynamic>
 
 This is base interface of all kind of endpoints. Endpoint is a specific profile
 with role of bluetooth device. E.g. Hands-Free profile in AudioGateway role of
@@ -438,7 +438,7 @@ Properties
 
 Service		org.hsphfpd
 Interface	org.hsphfpd.ClientEndpoint
-Object		/org/hsphfpd/hciX/dev_XX_XX_XX_XX_XX_XX/XXX_hX
+Object		<dynamic>
 
 This interface is specific for Client role endpoints.
 
@@ -456,7 +456,7 @@ Methods
 
 Service		org.hsphfpd
 Interface	org.hsphfpd.HSPClientEndpoint
-Object		/org/hsphfpd/hciX/dev_XX_XX_XX_XX_XX_XX/hsp_hs
+Object		<dynamic>
 
 This interface is specific for Client role endpoints of Headset Profile.
 
@@ -472,7 +472,7 @@ Methods
 
 Service		org.hsphfpd
 Interface	org.hsphfpd.GatewayEndpoint
-Object		/org/hsphfpd/hciX/dev_XX_XX_XX_XX_XX_XX/XXX_ag
+Object		<dynamic>
 
 This interface is specific for Gateway role endpoints.
 
@@ -486,7 +486,7 @@ Signals
 
 Service		org.hsphfpd
 Interface	org.hsphfpd.HSPGatewayEndpoint
-Object		/org/hsphfpd/hciX/dev_XX_XX_XX_XX_XX_XX/hsp_ag
+Object		<dynamic>
 
 This interface is specific for Gateway role endpoints of Headset Profile.
 
@@ -510,7 +510,7 @@ Signals
 
 Service		org.hsphfpd
 Interface	org.hsphfpd.AudioTransport
-Object		/org/hsphfpd/hciX/dev_XX_XX_XX_XX_XX_XX/audio
+Object		<dynamic>
 
 This interface represents audio transport between audio application agent and
 hsphfpd daemon.
@@ -770,7 +770,7 @@ registered by RegisterApplication() method.
 When Telephony agent is not connected to HFP device then hsphfpd takes care of
 it and provides dummy responses to HFP devices.
 
-Service:	<freely defined>
+Service		<freely defined>
 Interface	org.hsphfpd.TelephonyAgent
 Object		<freely defined>
 
