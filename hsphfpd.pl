@@ -1648,6 +1648,8 @@ sub hsphfpd_socket_ready_read {
 				my @hf_codecs = map { exists $hf_codecs_map{$_} ? $hf_codecs_map{$_} : "hf_codec_$_" } @hf_codec_ids;
 				print "HF codecs:\n" . (join "\n", @hf_codecs) . "\n";
 				$endpoints{$endpoint}->{hf_codecs} = \@hf_codecs;
+				# After receiving AT+BAC it is required to re-select codec via +BCS
+				$endpoints{$endpoint}->{selected_codec} = '';
 				hsphfpd_update_codecs($endpoint);
 				hsphfpd_socket_write($endpoint, 'OK') or return;
 			} elsif ($line eq 'AT+CIND=?') {
