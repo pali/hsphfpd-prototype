@@ -2312,6 +2312,8 @@ sub bluez_interfaces_added {
 				# AF_BLUETOOTH => 31, struct sockaddr_hci { sa_family_t hci_family; unsigned short hci_dev; unsigned short hci_channel; }, sa_family_t = uint16_t
 				if (bind $hci_socket, pack 'SS!S!', 31, $hci_id, 0) {
 					my (@ext_features, $local_commands, %local_codecs);
+					# HCIDEVUP => 1074022601
+					ioctl $hci_socket, 1074022601, 0;
 					@ext_features = hci_ext_features($hci_socket);
 					if (@ext_features) {
 						$local_commands = hci_local_commands($hci_socket);
