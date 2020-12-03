@@ -5,6 +5,8 @@ use 5.010;
 use strict;
 use warnings;
 
+die "This is example tutorial code for developers which does nothing meaningful\n";
+
 use Net::DBus qw(:typing);
 use Net::DBus::Error;
 use Net::DBus::Reactor;
@@ -78,7 +80,7 @@ sub NewConnection {
 	my $call_waiting_notifications;
 	my $voice_recognition;
 	my $response_and_hold_state = -1;
-	my $voice_call_state = 0; # 0 = no, 1 = ringing incoming, 2 = active incoming, 3 = hold incoming, 4 = rining outgoing, 5 = active outing, 6 = hold outgoing
+	my $voice_call_state = 0; # 0 = no, 1 = ringing incoming, 2 = active incoming, 3 = hold incoming, 4 = ringing outgoing, 5 = active outing, 6 = hold outgoing
 	my %indicator_num; # name => num; name: service, call, callsetup, call_setup, callheld, signal, roam
 	my %indicator_state;
 	my %indicator_value = (service => 1, call => 0, callsetup => 0, call_setup => 0, callheld => 0, signal => 5, roam => 0);
@@ -198,9 +200,6 @@ sub NewConnection {
 				print 'Request for ' . ($enable ? 'enabling' : 'disabling') . " of voice recognition function\n";
 				$voice_recognition = $enable;
 				$socket_write->('OK') or return;
-			} elsif ($line eq 'AT+NREC=0') {
-				print "Request for disabling of noise reduction and echo canceling\n";
-				$socket_write->('OK') or return;
 			} elsif ($line eq 'AT+BTRH?') {
 				print "Request for state of Response and Hold feature\n";
 				if ($response_and_hold_state != -1) {
@@ -223,7 +222,7 @@ sub NewConnection {
 				# 2 = Siri is available but not enabled
 				$socket_write->('+APLSIRI: 2') or return;
 			} elsif ($line =~ /^AT\+APLEFM=(0x[0-9a-fA-F]+|[0-9]+)$/) {
-				print "Siri Eyes Free mode changed";
+				print "Siri Eyes Free mode changed\n";
 				# OK is the only allowed response
 				$socket_write->('OK') or return;
 			} elsif ($line eq 'ATA') {
