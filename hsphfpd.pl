@@ -1765,6 +1765,11 @@ sub hsphfpd_socket_ready_read {
 					print "Unhandled indicator $ind ($hf_indicators_map{$ind})\n";
 					hsphfpd_socket_write($endpoint, 'ERROR') or return;
 				}
+			} elsif ($line eq 'AT+NREC=0') {
+				print "Request for disabling of noise reduction and echo canceling\n";
+				# For now expects that audio agent does not support NR and EC
+				# ERROR means that NR and EC are unsupported by AG
+				hsphfpd_socket_write($endpoint, 'ERROR') or return;
 			} elsif ($line =~ /^AT\+VGS=([0-9]+)$/) {
 				my $new_gain = $1;
 				hsphfpd_tx_volume_control_changed($endpoint, 'remote');
@@ -1889,16 +1894,6 @@ sub hsphfpd_socket_ready_read {
 					hsphfpd_telephony_write($endpoint, $origline, 1);
 				} else {
 					print "Telephony agent is not connected\n";
-					hsphfpd_socket_write($endpoint, 'ERROR') or return;
-				}
-			} elsif ($line eq 'AT+NREC=0') {
-				print "Request for disabling of noise reduction and echo canceling\n";
-				if (exists $endpoints{$endpoint}->{telephony}) {
-					print "Forwarding to telephony agent\n";
-					hsphfpd_telephony_write($endpoint, $origline, 1);
-				} else {
-					print "Telephony agent is not connected\n";
-					# ERROR means that NR and EC are unsupported
 					hsphfpd_socket_write($endpoint, 'ERROR') or return;
 				}
 			} elsif ($line eq 'AT+BTRH?') {
