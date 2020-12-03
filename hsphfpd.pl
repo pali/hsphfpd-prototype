@@ -2523,7 +2523,7 @@ sub hci_local_commands {
 	return unless defined $local_commands_len;
 	do { print "Invalid response for READ_LOCAL_COMMANDS command from bluetooth socket\n"; return } unless $local_commands_len == 65 and length $local_commands_packed >= 65;
 	my ($local_commands_status) = unpack 'C', $local_commands_packed;
-	do { print "READ_LOCAL_COMMANDS command on bluetooth socket failed: $local_commands_status"; return } unless $local_commands_status == 0;
+	do { print "READ_LOCAL_COMMANDS command on bluetooth socket failed: $local_commands_status\n"; return } unless $local_commands_status == 0;
 	return substr $local_commands_packed, 1;
 }
 
@@ -2534,7 +2534,7 @@ sub hci_ext_features {
 	return unless defined $ext_features_len;
 	do { print "Invalid response for READ_LOCAL_EXT_FEATURES command from bluetooth socket\n"; return } unless $ext_features_len == 11 and length $ext_features_packed >= 11;
 	my ($ext_features_status, $ext_features_page_num, undef, @ext_features) = unpack 'CCCC8', $ext_features_packed;
-	do { print "READ_LOCAL_EXT_FEATURES command on bluetooth socket failed: $ext_features_status"; return } unless $ext_features_status == 0;
+	do { print "READ_LOCAL_EXT_FEATURES command on bluetooth socket failed: $ext_features_status\n"; return } unless $ext_features_status == 0;
 	do { print "Invalid response for READ_LOCAL_EXT_FEATURES command from bluetooth socket\n"; return } unless $ext_features_page_num == 0;
 	return @ext_features;
 }
@@ -2546,7 +2546,7 @@ sub hci_local_codecs {
 	return unless defined $local_codecs_len;
 	do { print "Invalid response for READ_LOCAL_CODECS command from bluetooth socket\n"; return } unless $local_codecs_len >= 2 and length $local_codecs_packed >= 2;
 	my ($local_codecs_status, $local_codecs_count) = unpack 'CC', $local_codecs_packed;
-	do { print "READ_LOCAL_CODECS command on bluetooth socket failed: $local_codecs_status"; return } unless $local_codecs_status == 0;
+	do { print "READ_LOCAL_CODECS command on bluetooth socket failed: $local_codecs_status\n"; return } unless $local_codecs_status == 0;
 	do { print "Invalid response for READ_LOCAL_CODECS command from bluetooth socket\n"; return } unless length $local_codecs_packed >= 2+$local_codecs_count+1;
 	my $local_vendor_codecs_count = unpack 'C', substr $local_codecs_packed, 2+$local_codecs_count, 1;
 	do { print "Invalid response for READ_LOCAL_CODECS command from bluetooth socket\n"; return } unless length $local_codecs_packed >= 2+$local_codecs_count+1+4*$local_vendor_codecs_count;
