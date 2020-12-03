@@ -1922,7 +1922,7 @@ sub hsphfpd_socket_ready_read {
 					hsphfpd_socket_write($endpoint, 'ERROR') or return;
 				}
 			} elsif ($line eq 'AT+APLSIRI?') {
-				print "Request for Siri status, but telephony agent is not connected\n";
+				print "Request for Siri status\n";
 				if (exists $endpoints{$endpoint}->{telephony}) {
 					print "Forwarding to telephony agent\n";
 					hsphfpd_telephony_write($endpoint, $origline, 1);
@@ -1932,7 +1932,7 @@ sub hsphfpd_socket_ready_read {
 					hsphfpd_socket_write($endpoint, '+APLSIRI: 2') or return;
 				}
 			} elsif ($line =~ /^AT\+APLEFM=(0x[0-9a-fA-F]+|[0-9]+)$/) {
-				print "Siri Eyes Free mode changed";
+				print "Siri Eyes Free mode changed\n";
 				if (exists $endpoints{$endpoint}->{telephony}) {
 					print "Forwarding to telephony agent\n";
 					hsphfpd_telephony_write($endpoint, $origline, 1);
