@@ -2668,14 +2668,14 @@ sub main::HSPGatewayEndpoint::SendButtonPressEvent { hsphfpd_send_button_event(s
 	}
 }
 sub main::Audio::Release { hsphfpd_disconnect_audio(shift->get_object_path()) }
-sub main::Audio::RxVolumeControl { $endpoints{$audios{shift->get_object_path()}->{endpoint}}->{rx_volume_control} }
-sub main::Audio::TxVolumeControl { $endpoints{$audios{shift->get_object_path()}->{endpoint}}->{tx_volume_control} }
-sub main::Audio::RxVolumeGain { hsphfpd_rx_volume_gain(shift->get_object_path(), @_) }
-sub main::Audio::TxVolumeGain { hsphfpd_tx_volume_gain(shift->get_object_path(), @_) }
-sub main::Audio::MTU { $audios{shift->get_object_path()}->{mtu} }
-sub main::Audio::AirCodec { $audios{shift->get_object_path()}->{air_codec} }
-sub main::Audio::AgentCodec { $audios{shift->get_object_path()}->{agent_codec} }
-sub main::Audio::Endpoint { $audios{shift->get_object_path()}->{endpoint} }
+sub main::Audio::RxVolumeControl { dbus_string($endpoints{$audios{shift->get_object_path()}->{endpoint}}->{rx_volume_control}) }
+sub main::Audio::TxVolumeControl { dbus_string($endpoints{$audios{shift->get_object_path()}->{endpoint}}->{tx_volume_control}) }
+sub main::Audio::RxVolumeGain { dbus_uint16(hsphfpd_rx_volume_gain(shift->get_object_path(), @_)) }
+sub main::Audio::TxVolumeGain { dbus_uint16(hsphfpd_tx_volume_gain(shift->get_object_path(), @_)) }
+sub main::Audio::MTU { dbus_uint16($audios{shift->get_object_path()}->{mtu}) }
+sub main::Audio::AirCodec { dbus_string($audios{shift->get_object_path()}->{air_codec}) }
+sub main::Audio::AgentCodec { dbus_string($audios{shift->get_object_path()}->{agent_codec}) }
+sub main::Audio::Endpoint { dbus_object_path($audios{shift->get_object_path()}->{endpoint}) }
 
 {
 	package main::Profile;
@@ -2701,5 +2701,5 @@ sub main::Profile::Release { bluez_release_profile(profile_obj_to_name(shift), @
 		dbus_property('BatteryLevel', 'int16', 'readwrite', { strict_exceptions => 1 });
 	}
 }
-sub main::PowerSupply::PowerSource { shift; hsphfpd_our_power_source(@_) }
-sub main::PowerSupply::BatteryLevel { shift; hsphfpd_our_battery_level(@_) }
+sub main::PowerSupply::PowerSource { shift; dbus_string(hsphfpd_our_power_source(@_)) }
+sub main::PowerSupply::BatteryLevel { shift; dbus_int16(hsphfpd_our_battery_level(@_)) }
