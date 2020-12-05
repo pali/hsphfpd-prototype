@@ -708,9 +708,10 @@ Methods
 		void NewConnection(object audio_transport, fd sco, dict properties)
 
 			properties:
-				string VolumeControl
-				uint16 MicrophoneGain
-				uint16 SpeakerGain
+				string RxVolumeControl
+				string TxVolumeControl
+				uint16 RxVolumeGain
+				uint16 TxVolumeGain
 				uint16 MTU
 				object Endpoint
 				string Name
