@@ -954,10 +954,14 @@ sub hsphfpd_establish_audio {
 	my $audio_suffix = $audio;
 	$audio_suffix =~ s/^\Q$hsphfpd_manager_path\E//;
 
+	{
+	local %Net::DBus::Exporter::dbus_introspectors;
 	$endpoints{$endpoint}->{audio} = $audio;
 	$audios{$audio} = { endpoint => $endpoint, socket => $socket, mtu => $mtu, air_codec => $air_codec, agent_codec => $agent_codec };
 	$audios{$audio}->{object} = main::Audio->new($hsphfpd_manager, $audio_suffix);
+	$audios{$audio}->{object}->_introspector() if $audios{$audio}->{object}->can('_introspector');
 	$reactor->add_exception(fileno $socket, sub { print "Socket exception on audio transport $audio\n"; hsphfpd_disconnect_audio($audio) });
+	}
 
 	print "Audio transport $audio created\n";
 
