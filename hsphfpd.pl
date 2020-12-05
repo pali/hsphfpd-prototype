@@ -2106,8 +2106,11 @@ sub hsphfpd_connect_endpoint {
 			ioctl $uinput, 1074025829, 169 or do { print "Cannot call ioctl UI_SET_KEYBIT KEY_PHONE on uinput device: $!\n"; last };
 			# UI_SET_PHYS => 1074287980
 			ioctl $uinput, 1074287980, pack 'Z*', lc $endpoints{$endpoint}->{properties}->{LocalAddress}->value() or print "Cannot call ioctl UI_SET_PHYS on uinput device: $!\n";
+			# Kernel does not implement UI_SET_UNIQ support yet
+			if (0) {
 			# UI_SET_UNIQ => 1074287983
 			ioctl $uinput, 1074287983, pack 'Z*', lc $endpoints{$endpoint}->{properties}->{RemoteAddress}->value() or print "Cannot call ioctl UI_SET_UNIQ on uinput device: $!\n";
+			}
 			# struct uinput_user_dev { char name[UINPUT_MAX_NAME_SIZE]; struct input_id id; uint32_t ff_effects_max; int32_t absmax[ABS_CNT]; int32_t absmin[ABS_CNT]; int32_t absfuzz[ABS_CNT]; int32_t absflat[ABS_CNT]; }, struct input_id { uint16_t bustype; uint16_t vendor; uint16_t product; uint16_t version; }, BUS_BLUETOOTH => 5
 			syswrite $uinput, pack 'a[80](S)4L((l)[64])4', $name, 5, $vendor, $product, $version, 0, (((0) x 64) x 4) or do { print "Cannot write device name to uinput device: $!\n"; last };
 			# UI_DEV_CREATE => 21761
