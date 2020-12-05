@@ -621,6 +621,22 @@ Properties
 			Possible values:
 			0-15
 
+		bool NREC [readonly, const, optional]
+
+			True whether audio agent is doing echo canceling and
+			noise reduction functions.
+
+			Property is present only in HFP profile and has meaning
+			only for HFP profile. When set to True then audio agent
+			must do echo canceling and noise reduction functions to
+			fulfill HFP specification and audio quality. When to set
+			to False then audio agent must not enable echo canceling
+			and noise reduction functions.
+
+			In HSP profile audio agent should do or disable echo
+			canceling and noise reduction functions based on system
+			audio settings or other audio characteristic.
+
 		uint16 MTU [readonly, const]
 
 			MTU of SCO socket.
@@ -712,6 +728,7 @@ Methods
 				string TxVolumeControl
 				uint16 RxVolumeGain
 				uint16 TxVolumeGain
+				bool NREC
 				uint16 MTU
 				object Endpoint
 				string Name

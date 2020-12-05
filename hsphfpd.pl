@@ -216,7 +216,7 @@ my $our_battery_level = -1;
 my %profiles; # profile => exists
 my %adapters; # adapter => {address, devices => {device => exists}, codecs => {air_codec => agent_codec => exists}}
 my %devices; # device => {adapter, selected_profile, profiles => {profile => endpoint}}
-my %endpoints; # endpoint => {device, audio, profile, object, properties, hs_volume_control, hfp_wide_band_speech, ag_features, ag_indicators, ag_indicators_reporting, ag_call_waiting_notifications, hf_features, csr_features, apple_features, hf_codecs, csr_codecs, selected_codec, socket, rx_volume_control, tx_volume_control, rx_volume_gain, tx_volume_gain}
+my %endpoints; # endpoint => {device, audio, profile, object, properties, hs_volume_control, hfp_wide_band_speech, ag_features, ag_indicators, ag_indicators_reporting, ag_call_waiting_notifications, hf_features, csr_features, apple_features, hf_codecs, csr_codecs, selected_codec, socket, rx_volume_control, tx_volume_control, rx_volume_gain, tx_volume_gain, nrec}
 my %audios; # audio => {endpoint, socket, object, mtu, air_codec, agent_codec, agent_path, application_service, application_path}
 my @applications; # [application]
 
@@ -960,6 +960,7 @@ sub hsphfpd_establish_audio {
 	$audios{$audio} = { endpoint => $endpoint, socket => $socket, mtu => $mtu, air_codec => $air_codec, agent_codec => $agent_codec };
 	$audios{$audio}->{object} = main::Audio->new($hsphfpd_manager, $audio_suffix);
 	$audios{$audio}->{object}->_introspector() if $audios{$audio}->{object}->can('_introspector');
+	delete $audios{$audio}->{object}->{introspector}->{interfaces}->{'org.hsphfpd.AudioTransport'}->{props}->{NREC} unless exists $endpoints{$endpoint}->{nrec};
 	$reactor->add_exception(fileno $socket, sub { print "Socket exception on audio transport $audio\n"; hsphfpd_disconnect_audio($audio) });
 	}
 
@@ -973,6 +974,9 @@ sub hsphfpd_establish_audio {
 		TxVolumeControl => dbus_string($endpoints{$endpoint}->{tx_volume_control}),
 		($endpoints{$endpoint}->{tx_volume_control} ne 'none') ? (
 			TxVolumeGain => dbus_uint16($endpoints{$endpoint}->{tx_volume_gain}),
+		) : (),
+		(exists $endpoints{$endpoint}->{nrec}) ? (
+			NREC => dbus_boolean($endpoints{$endpoint}->{nrec}),
 		) : (),
 		MTU => dbus_uint16($mtu),
 		Endpoint => dbus_object_path($endpoint),
@@ -1768,9 +1772,8 @@ sub hsphfpd_socket_ready_read {
 				}
 			} elsif ($line eq 'AT+NREC=0') {
 				print "Request for disabling of noise reduction and echo canceling\n";
-				# For now expects that audio agent does not support NR and EC
-				# ERROR means that NR and EC are unsupported by AG
-				hsphfpd_socket_write($endpoint, 'ERROR') or return;
+				$endpoints{$endpoint}->{nrec} = 0;
+				hsphfpd_socket_write($endpoint, 'OK') or return;
 			} elsif ($line =~ /^AT\+VGS=([0-9]+)$/) {
 				my $new_gain = $1;
 				hsphfpd_tx_volume_control_changed($endpoint, 'remote');
@@ -2441,7 +2444,7 @@ sub bluez_interfaces_added {
 			$devices{$device}->{adapter} = $adapter;
 			$devices{$device}->{profiles}->{$profile} = $endpoint;
 			# TODO: load codecs, gains, profile, version, last codec and features from local cache
-			$endpoints{$endpoint} = { device => $device, modalias => $modalias, profile => $profile, ag_indicators => $ag_indicators // {}, rx_volume_control => $init_volume_control, tx_volume_control => $init_volume_control, ag_indicators_reporting => 0, hf_features => {}, ag_features => {}, csr_features => {}, apple_features => {}, hf_indicators => {}, hf_codecs => [], csr_codecs => [], rx_volume_gain => 8, tx_volume_gain => 8, selected_codec => 'CVSD', codecs => { CVSD => 1 } };
+			$endpoints{$endpoint} = { device => $device, modalias => $modalias, profile => $profile, ag_indicators => $ag_indicators // {}, rx_volume_control => $init_volume_control, tx_volume_control => $init_volume_control, ag_indicators_reporting => 0, hf_features => {}, ag_features => {}, csr_features => {}, apple_features => {}, hf_indicators => {}, hf_codecs => [], csr_codecs => [], rx_volume_gain => 8, tx_volume_gain => 8, ($profile =~ /^hfp_/) ? (nrec => (($profile =~ /_ag$/) ? 0 : 1)) : (), selected_codec => 'CVSD', codecs => { CVSD => 1 } };
 			$endpoints{$endpoint}->{properties} = { Name => dbus_string($name), LocalAddress => dbus_string($adapter_address), RemoteAddress => dbus_string($address), Connected => dbus_boolean(0), AudioConnected => dbus_boolean(0), TelephonyConnected => dbus_boolean(0), Profile => dbus_string($profile_name), Version => dbus_string(''), Role => dbus_string($role_name), PowerSource => dbus_string('unknown'), BatteryLevel => dbus_int16(-1), Features => dbus_array([]), AudioCodecs => dbus_array([ dbus_string('CVSD') ]) };
 			$endpoints{$endpoint}->{object} = $class->new($hsphfpd_manager, $endpoint_suffix);
 			$hsphfpd_manager->emit_signal('InterfacesAdded', $endpoint, { 'org.hsphfpd.Endpoint' => $endpoints{$endpoint}->{properties} });
@@ -2660,6 +2663,7 @@ sub main::HSPGatewayEndpoint::SendButtonPressEvent { hsphfpd_send_button_event(s
 		dbus_property('TxVolumeControl', 'string', 'read', { strict_exceptions => 1 });
 		dbus_property('RxVolumeGain', 'uint16', 'readwrite', { strict_exceptions => 1 });
 		dbus_property('TxVolumeGain', 'uint16', 'readwrite', { strict_exceptions => 1 });
+		dbus_property('NREC', 'bool', 'read', { strict_exceptions => 1 });
 		dbus_property('MTU', 'uint16', 'read', { strict_exceptions => 1 });
 		dbus_property('AirCodec', 'string', 'read', { strict_exceptions => 1 });
 		dbus_property('AgentCodec', 'string', 'read', { strict_exceptions => 1 });
@@ -2672,6 +2676,7 @@ sub main::Audio::RxVolumeControl { dbus_string($endpoints{$audios{shift->get_obj
 sub main::Audio::TxVolumeControl { dbus_string($endpoints{$audios{shift->get_object_path()}->{endpoint}}->{tx_volume_control}) }
 sub main::Audio::RxVolumeGain { dbus_uint16(hsphfpd_rx_volume_gain(shift->get_object_path(), @_)) }
 sub main::Audio::TxVolumeGain { dbus_uint16(hsphfpd_tx_volume_gain(shift->get_object_path(), @_)) }
+sub main::Audio::NREC { my $e = $endpoints{$audios{shift->get_object_path()}->{endpoint}}; exists $e->{nrec} ? dbus_boolean($e->{nrec}) : throw_dbus_error('org.freedesktop.DBus.Error.InvalidArgs', 'No such property \'NREC\'') }
 sub main::Audio::MTU { dbus_uint16($audios{shift->get_object_path()}->{mtu}) }
 sub main::Audio::AirCodec { dbus_string($audios{shift->get_object_path()}->{air_codec}) }
 sub main::Audio::AgentCodec { dbus_string($audios{shift->get_object_path()}->{agent_codec}) }
