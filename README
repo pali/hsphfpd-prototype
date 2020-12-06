@@ -93,6 +93,9 @@ And then copy DBus policy file into DBus system directory:
 
   sudo cp org.hsphfpd.conf /etc/dbus-1/system.d/
 
+After updating rules you need to reload dbus:
+
+  sudo systemctl reload dbus
 
 Running prototype
 =================
