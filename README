@@ -114,6 +114,11 @@ unload pulseaudio bluetooth modules:
   pactl unload-module module-bluez5-device
   pactl unload-module module-bluez5-discover
   pactl unload-module module-bluetooth-discover
+  
+Likewise, pipewire must be disabled:
+
+  sudo systemctl disable --global pipewire
+  sudo systemctl disable --global wireplumber
 
 After that it is possible to start hsphfpd prototype daemon implementation:
 
